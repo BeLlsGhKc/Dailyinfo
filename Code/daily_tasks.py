@@ -296,12 +296,25 @@ class TaskDetailDialog(QDialog):
         line.setStyleSheet("background: rgba(0,0,0,0.15);")
         layout.addWidget(line)
 
-        # 标题（只读）
+        # 标题（可编辑）
         layout.addWidget(self._label("标题"))
-        title_display = QLabel(self.task["title"])
-        title_display.setStyleSheet("color: #1d1d1f; font-size: 15px; font-weight: 500; padding: 10px 12px; background: rgba(255,255,255,0.9); border: 1px solid rgba(0,0,0,0.1); border-radius: 8px;")
-        title_display.setWordWrap(True)
-        layout.addWidget(title_display)
+        self.title_edit = QLineEdit(self.task["title"])
+        self.title_edit.setFixedHeight(44)
+        self.title_edit.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255,255,255,0.9);
+                border: 1px solid rgba(0,0,0,0.1);
+                border-radius: 8px;
+                padding: 10px 12px;
+                font-size: 15px;
+                font-weight: 500;
+                color: #1d1d1f;
+            }
+            QLineEdit:focus {
+                border: 1.5px solid #007AFF;
+            }
+        """)
+        layout.addWidget(self.title_edit)
 
         # 内容（可编辑）
         layout.addWidget(self._label("内容"))
@@ -409,11 +422,15 @@ class TaskDetailDialog(QDialog):
 
     def on_save(self):
         """保存修改但不关闭详情页"""
+        title = self.title_edit.text().strip()
         content = self.content_edit.toPlainText().strip()
-        self.manager.update_task(self.task["id"], {"content": content})
+        if not title:
+            QMessageBox.warning(self, "提示", "标题不能为空")
+            return
+        self.manager.update_task(self.task["id"], {"title": title, "content": content})
+        self.task["title"] = title
         self.task["content"] = content
         self.need_refresh = True
-        # 显示保存成功提示
         QMessageBox.information(self, "提示", "保存成功")
 
     def on_convert(self):
