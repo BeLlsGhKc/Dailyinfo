@@ -239,7 +239,9 @@ class TaskDetailDialog(QDialog):
         self.need_refresh = False
 
         self.setWindowTitle("任务详情")
-        self.setFixedSize(500, 580)
+        # 根据是否有截止日期调整窗口高度
+        height = 620 if task.get("deadline") else 560
+        self.setFixedSize(500, height)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
 
@@ -320,7 +322,8 @@ class TaskDetailDialog(QDialog):
         layout.addWidget(self._label("内容"))
         self.content_edit = QTextEdit()
         self.content_edit.setPlainText(self.task.get("content", ""))
-        self.content_edit.setMinimumHeight(180)
+        self.content_edit.setMinimumHeight(120)
+        self.content_edit.setMaximumHeight(160)
         self.content_edit.setStyleSheet("""
             QTextEdit {
                 background: rgba(255,255,255,0.9);
