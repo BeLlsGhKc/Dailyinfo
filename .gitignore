@@ -1,0 +1,20 @@
+# 数据文件
+Data/
+
+# 打包文件
+build/
+dist/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
