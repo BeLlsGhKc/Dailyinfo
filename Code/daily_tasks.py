@@ -96,8 +96,17 @@ class HolidayCalendar(QCalendarWidget):
 
 
 # 路径配置（Code 的上级目录）
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
+# PyInstaller 打包后，资源文件在临时目录中
+if getattr(sys, 'frozen', False):
+    # 打包后的路径：临时目录（资源文件解压位置）
+    BASE_DIR = sys._MEIPASS
+    # 数据文件保存在 exe 同级目录
+    DATA_DIR = os.path.join(os.path.dirname(sys.executable), "Data")
+else:
+    # 开发环境：Code 的上级目录
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DATA_DIR = os.path.join(BASE_DIR, "Data")
+
 ICO_DIR = os.path.join(BASE_DIR, "Ico")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -589,6 +598,7 @@ class TaskApp(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
 
+        # 设置任务栏图标
         icon_path = os.path.join(ICO_DIR, "岚兮儿.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -1694,13 +1704,26 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 
 if __name__ == "__main__":
+    # Windows 11 任务栏图标修复 - 必须在创建窗口之前调用
+    try:
+        myappid = 'Dailyinfo.TaskManager.1.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except:
+        pass
+
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
 
     icon_path = os.path.join(ICO_DIR, "岚兮儿.ico")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    app_icon = QIcon(icon_path) if os.path.exists(icon_path) else None
+    if app_icon:
+        app.setWindowIcon(app_icon)
 
     window = TaskApp()
     window.show()
+
+    # 窗口显示后再次设置图标
+    if app_icon:
+        window.setWindowIcon(app_icon)
+
     sys.exit(app.exec())
