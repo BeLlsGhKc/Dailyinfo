@@ -1086,7 +1086,7 @@ class TaskApp(QMainWindow):
                     background: rgba(142, 142, 147, 0.18);
                 }
             """)
-            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                完成时间", "创建时间"])
+            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                    完成时间", "创建时间"])
             self.refresh_history_list()
 
     def header_mouse_press(self, event):
@@ -1579,7 +1579,7 @@ class TaskApp(QMainWindow):
             completed_at = task.get("completed_at", "")
             if completed_at:
                 completed_label = QLabel(completed_at)
-                completed_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
+                completed_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 14px;")
                 completed_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 content_layout.addWidget(completed_label)
 
