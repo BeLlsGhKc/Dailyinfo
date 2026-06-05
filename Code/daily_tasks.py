@@ -20,43 +20,44 @@ from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter
 
 
 # 中国节假日数据（2026年）
+# 正日子显示节日名，其他假期日显示"节日名假期"
 HOLIDAYS = {
     # 元旦
     "2026-01-01": "元旦",
     # 春节
     "2026-02-17": "除夕",
     "2026-02-18": "春节",
-    "2026-02-19": "春节",
-    "2026-02-20": "春节",
-    "2026-02-21": "春节",
-    "2026-02-22": "春节",
-    "2026-02-23": "春节",
+    "2026-02-19": "春节假期",
+    "2026-02-20": "春节假期",
+    "2026-02-21": "春节假期",
+    "2026-02-22": "春节假期",
+    "2026-02-23": "春节假期",
     # 清明节
     "2026-04-05": "清明节",
-    "2026-04-06": "清明节",
-    "2026-04-07": "清明节",
+    "2026-04-06": "清明节假期",
+    "2026-04-07": "清明节假期",
     # 劳动节
     "2026-05-01": "劳动节",
-    "2026-05-02": "劳动节",
-    "2026-05-03": "劳动节",
-    "2026-05-04": "劳动节",
-    "2026-05-05": "劳动节",
+    "2026-05-02": "劳动节假期",
+    "2026-05-03": "劳动节假期",
+    "2026-05-04": "劳动节假期",
+    "2026-05-05": "劳动节假期",
     # 端午节
     "2026-06-19": "端午节",
-    "2026-06-20": "端午节",
-    "2026-06-21": "端午节",
+    "2026-06-20": "端午节假期",
+    "2026-06-21": "端午节假期",
     # 中秋节
     "2026-09-25": "中秋节",
-    "2026-09-26": "中秋节",
-    "2026-09-27": "中秋节",
+    "2026-09-26": "中秋节假期",
+    "2026-09-27": "中秋节假期",
     # 国庆节
     "2026-10-01": "国庆节",
-    "2026-10-02": "国庆节",
-    "2026-10-03": "国庆节",
-    "2026-10-04": "国庆节",
-    "2026-10-05": "国庆节",
-    "2026-10-06": "国庆节",
-    "2026-10-07": "国庆节",
+    "2026-10-02": "国庆节假期",
+    "2026-10-03": "国庆节假期",
+    "2026-10-04": "国庆节假期",
+    "2026-10-05": "国庆节假期",
+    "2026-10-06": "国庆节假期",
+    "2026-10-07": "国庆节假期",
 }
 
 
@@ -74,10 +75,21 @@ class HolidayCalendar(QCalendarWidget):
         # 先调用默认绘制
         super().paintCell(painter, rect, date)
 
-        # 检查是否是节假日
         date_str = date.toString("yyyy-MM-dd")
+        is_today = date == QDate.currentDate()
+
+        # 今天用青柠色高亮
+        if is_today:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            color = QColor(180, 230, 30, 80)  # 青柠色，半透明
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
+            painter.restore()
+
+        # 节假日显示青色背景
         if date_str in HOLIDAYS:
-            # 绘制青色背景
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing)
 
@@ -87,8 +99,12 @@ class HolidayCalendar(QCalendarWidget):
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
 
-            # 绘制日期文字（青色）
-            text_color = QColor(0, 199, 190)  # 青色
+            # 绘制日期文字（正日子红色，假期日青色）
+            holiday_name = HOLIDAYS[date_str]
+            if not holiday_name.endswith("假期"):
+                text_color = QColor(255, 59, 48)  # 红色（正日子）
+            else:
+                text_color = QColor(0, 199, 190)  # 青色（假期日）
             painter.setPen(text_color)
             painter.drawText(rect, Qt.AlignCenter, str(date.day()))
 
@@ -950,24 +966,60 @@ class TaskApp(QMainWindow):
         layout.addWidget(calendar)
 
         # 节假日信息显示
-        holiday_info = QLabel("点击日期查看节假日信息")
-        holiday_info.setStyleSheet("color: #8e8e93; font-size: 13px; padding: 8px;")
+        today = QDate.currentDate()
+        today_str = today.toString("yyyy-MM-dd")
+        if today_str in HOLIDAYS:
+            holiday_info = QLabel(HOLIDAYS[today_str])
+            holiday_info.setStyleSheet("color: #00C7BE; font-size: 14px; font-weight: 600; padding: 8px;")
+        else:
+            holiday_info = QLabel("点击日期查看节假日信息")
+            holiday_info.setStyleSheet("color: #8e8e93; font-size: 13px; padding: 8px;")
         holiday_info.setAlignment(Qt.AlignCenter)
         layout.addWidget(holiday_info)
 
         def on_date_selected(qdate):
             date_str = qdate.toString("yyyy-MM-dd")
             if date_str in HOLIDAYS:
-                holiday_info.setText(f"🎉 {HOLIDAYS[date_str]}")
+                holiday_info.setText(HOLIDAYS[date_str])
                 holiday_info.setStyleSheet("color: #00C7BE; font-size: 14px; font-weight: 600; padding: 8px;")
             else:
                 weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-                holiday_info.setText(f"{weekday[qdate.dayOfWeek() - 1]}")
+                holiday_info.setText(weekday[qdate.dayOfWeek() - 1])
                 holiday_info.setStyleSheet("color: #8e8e93; font-size: 13px; padding: 8px;")
 
         calendar.clicked.connect(on_date_selected)
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        # 回到今天按钮
+        back_today_btn = QPushButton("📅 回到今天")
+        back_today_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 122, 255, 0.1);
+                color: #007AFF;
+                border: 1px solid rgba(0, 122, 255, 0.2);
+                border-radius: 8px;
+                padding: 10px 16px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: rgba(0, 122, 255, 0.18);
+            }
+        """)
+        back_today_btn.setCursor(Qt.PointingHandCursor)
+
+        def go_today():
+            # 先更新说明文字
+            on_date_selected(today)
+            # 再跳转日历到当月
+            calendar.setSelectedDate(today)
+            calendar.showMonth(0)
+
+        back_today_btn.clicked.connect(go_today)
+        btn_layout.addWidget(back_today_btn)
+
         btn_layout.addStretch()
 
         close_btn = QPushButton("关闭")
@@ -1347,7 +1399,7 @@ class TaskApp(QMainWindow):
                 expire_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 content_layout.addWidget(expire_label)
             elif deadline and not is_expired_plan:
-                deadline_label = QLabel(f"📆 {deadline}")
+                deadline_label = QLabel(deadline)
                 deadline_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
                 deadline_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 content_layout.addWidget(deadline_label)
