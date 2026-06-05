@@ -28,13 +28,13 @@
 
 1. 克隆仓库
 ```bash
-git clone https://github.com/你的用户名/每日任务.git
-cd 每日任务
+git clone https://github.com/BeLlsGhKc/Dailyinfo.git
+cd Dailyinfo
 ```
 
 2. 创建虚拟环境
 ```bash
-conda create -n Dailyinfo python=3.12
+conda create -n Dailyinfo python=3.13
 conda activate Dailyinfo
 ```
 
@@ -48,8 +48,6 @@ pip install PySide6
 python Code/daily_tasks.py
 ```
 
-或者直接双击 `run.bat`
-
 ## 📁 目录结构
 
 ```
@@ -60,23 +58,25 @@ python Code/daily_tasks.py
 │   └── tasks.json
 ├── Ico/            # 图标文件
 │   └── 岚兮儿.ico
-├── .gitignore      # Git 忽略规则
-├── README.md       # 说明文档
-└── run.bat         # Windows 启动脚本
+├── .gitignore
+└── README.md
 ```
 
 ## 🛠️ 技术栈
 
-- Python 3.12
+- Python 3.13
 - PySide6 (Qt for Python)
 - Windows 毛玻璃 API
 
 ## 📝 更新日志
 
-### v1.0.0 (2026-06-03)
+### V2.0 (2026-06-05)
+- 修复了一些问题
+
+### V1.0.0 (2026-06-03)
 - 初始版本发布
 - 基础任务管理功能
-- 毛玻璃风格界面
+- 苹果毛玻璃风格界面
 - 日历和节假日显示
 
 ## 📄 开源协议
