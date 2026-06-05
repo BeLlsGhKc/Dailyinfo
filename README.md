@@ -15,14 +15,15 @@
 
 ## 📸 界面预览
 
-<img width="1883" height="1218" alt="image" src="https://github.com/user-attachments/assets/86f73f3c-911e-4dde-a1bd-7e92582be2fd" />
+<img width="1883" height="1218" alt="主页" src="https://github.com/user-attachments/assets/f6f5f698-daee-4daa-9aa1-cd2c59e8d1b9" />
+
 
 
 ## 🚀 快速开始
 
 ### 方式一：直接运行 exe
 
-前往 [Releases](../../releases) 页面下载最新版本的 `每日任务管理.exe`。
+前往 [Releases](../../releases) 页面下载最新版本的 `Dailyinfo.exe`。
 
 ### 方式二：源码运行
 
