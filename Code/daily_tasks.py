@@ -826,7 +826,7 @@ class TaskApp(QMainWindow):
         list_layout.setSpacing(0)
 
         self.task_list = QTreeWidget()
-        self.task_list.setHeaderLabels(["", "        任务内容", "创建时间"])
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
         self.task_list.setRootIsDecorated(False)
         self.task_list.header().setDefaultAlignment(Qt.AlignLeft)
         self.task_list.setColumnWidth(0, 80)
@@ -1065,6 +1065,7 @@ class TaskApp(QMainWindow):
                     background: rgba(0, 122, 255, 0.18);
                 }
             """)
+            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
             self.refresh_task_list()
         else:
             # 显示历史
@@ -1085,6 +1086,7 @@ class TaskApp(QMainWindow):
                     background: rgba(142, 142, 147, 0.18);
                 }
             """)
+            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                完成时间", "创建时间"])
             self.refresh_history_list()
 
     def header_mouse_press(self, event):
@@ -1395,12 +1397,12 @@ class TaskApp(QMainWindow):
             # 日期提醒（右贴边）
             if is_expired_plan:
                 expire_label = QLabel(f"⚠️ 已过期 {deadline}")
-                expire_label.setStyleSheet("color: #FF3B30; font-size: 12px; font-weight: 600; background: transparent; border: none;")
+                expire_label.setStyleSheet("color: #FF3B30; font-size: 12px; font-weight: 600; background: transparent; border: none; padding-right: 12px;")
                 expire_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 content_layout.addWidget(expire_label)
             elif deadline and not is_expired_plan:
                 deadline_label = QLabel(deadline)
-                deadline_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
+                deadline_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
                 deadline_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 content_layout.addWidget(deadline_label)
 
@@ -1573,11 +1575,19 @@ class TaskApp(QMainWindow):
             title_label.setStyleSheet("color: #1d1d1f; font-size: 14px; background: transparent; border: none;")
             content_layout.addWidget(title_label, 1)
 
+            # 完成时间（右贴边）
+            completed_at = task.get("completed_at", "")
+            if completed_at:
+                completed_label = QLabel(completed_at)
+                completed_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
+                completed_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                content_layout.addWidget(completed_label)
+
             self.task_list.setItemWidget(item, 1, content_widget)
 
-            # 完成时间
-            time_label = QLabel(task.get("completed_at", ""))
-            time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
+            # 创建时间
+            time_label = QLabel(task["created_at"])
+            time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
             self.task_list.setItemWidget(item, 2, time_label)
 
             bg = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["bg"]
