@@ -1,6 +1,9 @@
 # 数据文件
 Data/
 
+# Claude Code 指令文件
+CLAUDE.md
+
 # 打包文件
 build/
 dist/

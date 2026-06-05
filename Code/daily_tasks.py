@@ -72,43 +72,45 @@ class HolidayCalendar(QCalendarWidget):
 
     def paintCell(self, painter, rect, date):
         """自定义单元格绘制"""
-        # 先调用默认绘制
-        super().paintCell(painter, rect, date)
-
         date_str = date.toString("yyyy-MM-dd")
         is_today = date == QDate.currentDate()
+        is_selected = date == self.selectedDate()
+        is_holiday = date_str in HOLIDAYS
 
-        # 今天用青柠色高亮
-        if is_today:
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing)
-            color = QColor(180, 230, 30, 80)  # 青柠色，半透明
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if is_selected:
+            # 选中状态：蓝色圆角背景
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 122, 255))
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 6, 6)
+            text_color = QColor(255, 255, 255)
+        elif is_today:
+            # 今天：深灰色背景，无边框
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(200, 200, 200))
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 6, 6)
+            text_color = QColor(29, 29, 31)
+        elif is_holiday:
+            # 节假日：半透明青色背景
+            color = QColor(0, 199, 190, 40)
             painter.setBrush(color)
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
-            painter.restore()
-
-        # 节假日显示青色背景
-        if date_str in HOLIDAYS:
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing)
-
-            # 半透明青色背景
-            color = QColor(0, 199, 190, 40)  # 青色，半透明
-            painter.setBrush(color)
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
-
-            # 绘制日期文字（正日子红色，假期日青色）
             holiday_name = HOLIDAYS[date_str]
             if not holiday_name.endswith("假期"):
                 text_color = QColor(255, 59, 48)  # 红色（正日子）
             else:
                 text_color = QColor(0, 199, 190)  # 青色（假期日）
-            painter.setPen(text_color)
-            painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+        else:
+            # 普通日期
+            text_color = QColor(29, 29, 31)
 
-            painter.restore()
+        # 绘制日期文字
+        painter.setPen(text_color)
+        painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+        painter.restore()
 
 
 # 路径配置（Code 的上级目录）
@@ -958,9 +960,12 @@ class TaskApp(QMainWindow):
                 background: rgba(0, 122, 255, 0.08);
             }
             QCalendarWidget QAbstractItemView {
-                selection-background-color: #007AFF;
-                selection-color: white;
+                selection-background-color: rgba(180, 180, 180, 0.6);
+                selection-color: #1d1d1f;
                 font-size: 14px;
+            }
+            QCalendarWidget QWidget#qt_calendar_navigationbar {
+                background: transparent;
             }
         """)
         layout.addWidget(calendar)
@@ -1295,6 +1300,7 @@ class TaskApp(QMainWindow):
 
     def refresh_task_list(self):
         """刷新任务列表（默认显示所有未完成任务）"""
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
         self.task_list.clear()
 
         today = date.today().strftime("%Y-%m-%d")
@@ -1430,6 +1436,7 @@ class TaskApp(QMainWindow):
 
     def refresh_search_list(self, results):
         """刷新搜索结果列表"""
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                时间信息", "创建时间"])
         self.task_list.clear()
 
         all_tasks = []
@@ -1447,35 +1454,69 @@ class TaskApp(QMainWindow):
             item.setData(0, Qt.UserRole, task["id"])
             self.task_list.addTopLevelItem(item)
 
+            priority = task["priority"]
+            hover_color = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["color"]
+            hover_bg = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["bg"]
+
             if task_type == "pending":
+                # 待办：空方框
                 check_btn = QPushButton()
-                check_btn.setFixedSize(22, 22)
+                check_btn.setFixedSize(26, 26)
                 check_btn.setCursor(Qt.PointingHandCursor)
-                check_btn.setStyleSheet("""
-                    QPushButton {
+                check_btn.setStyleSheet(f"""
+                    QPushButton {{
                         background: rgba(255,255,255,0.7);
                         border: 2px solid #c7c7cc;
                         border-radius: 5px;
-                    }
-                    QPushButton:hover {
-                        border: 2px solid #34C759;
-                        background: rgba(52,199,89,0.15);
-                    }
+                    }}
+                    QPushButton:hover {{
+                        border: 2px solid {hover_color};
+                        background: {hover_bg};
+                    }}
                 """)
                 check_btn.clicked.connect(lambda _, tid=task["id"]: self.quick_complete(tid))
-                self.task_list.setItemWidget(item, 0, check_btn)
-            else:
-                done_label = QLabel("✓")
-                done_label.setStyleSheet("color: #34C759; font-size: 16px; background: transparent; border: none;")
-                done_label.setAlignment(Qt.AlignCenter)
-                self.task_list.setItemWidget(item, 0, done_label)
 
+                check_container = QWidget()
+                check_layout = QHBoxLayout(check_container)
+                check_layout.setContentsMargins(0, 8, 0, 0)
+                check_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                check_layout.addWidget(check_btn)
+                self.task_list.setItemWidget(item, 0, check_container)
+            else:
+                # 已完成：绿色对钩
+                uncheck_btn = QPushButton("✓")
+                uncheck_btn.setFixedSize(26, 26)
+                uncheck_btn.setCursor(Qt.PointingHandCursor)
+                uncheck_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: #34C759;
+                        border: 2px solid #2DA44E;
+                        border-radius: 5px;
+                        color: white;
+                        font-size: 16px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{
+                        border: 2px solid {hover_color};
+                        background: {hover_bg};
+                        color: {hover_color};
+                    }}
+                """)
+                uncheck_btn.clicked.connect(lambda _, tid=task["id"]: self.quick_uncomplete(tid))
+
+                btn_container = QWidget()
+                btn_layout = QHBoxLayout(btn_container)
+                btn_layout.setContentsMargins(0, 8, 0, 0)
+                btn_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                btn_layout.addWidget(uncheck_btn)
+                self.task_list.setItemWidget(item, 0, btn_container)
+
+            # 任务内容
             content_widget = QWidget()
             content_layout = QHBoxLayout(content_widget)
-            content_layout.setContentsMargins(8, 0, 8, 0)
+            content_layout.setContentsMargins(12, 0, 8, 0)
             content_layout.setSpacing(10)
 
-            priority = task["priority"]
             dot_color = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["color"]
             dot = QLabel("●")
             dot.setStyleSheet(f"color: {dot_color}; font-size: 16px; background: transparent; border: none;")
@@ -1486,21 +1527,44 @@ class TaskApp(QMainWindow):
             title = task["title"]
             if task["type"] == "计划任务":
                 title = f"📅 {title}"
-            if task_type == "completed":
-                title += "  [已完成]"
 
             title_label = QLabel(title)
             title_label.setStyleSheet("color: #1d1d1f; font-size: 14px; background: transparent; border: none;")
             content_layout.addWidget(title_label, 1)
 
+            # 右贴边时间信息
+            today = date.today().strftime("%Y-%m-%d")
+            if task_type == "pending":
+                deadline = task.get("deadline", "")
+                if deadline:
+                    if deadline < today:
+                        time_info = QLabel(f"⚠️ 已过期 {deadline}")
+                        time_info.setStyleSheet("color: #FF3B30; font-size: 12px; font-weight: 600; background: transparent; border: none; padding-right: 12px;")
+                    else:
+                        time_info = QLabel(deadline)
+                        time_info.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
+                    time_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    content_layout.addWidget(time_info)
+            else:
+                completed_at = task.get("completed_at", "")
+                if completed_at:
+                    time_info = QLabel(f"✓ {completed_at}")
+                    time_info.setStyleSheet("color: #34C759; font-size: 12px; font-weight: 600; background: transparent; border: none; padding-right: 12px;")
+                    time_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    content_layout.addWidget(time_info)
+
             self.task_list.setItemWidget(item, 1, content_widget)
 
-            time_str = task["completed_at"] if task_type == "completed" else task["created_at"]
-            time_label = QLabel(time_str)
+            # 创建时间
+            time_label = QLabel(task["created_at"])
             time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
             self.task_list.setItemWidget(item, 2, time_label)
 
-            bg = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["bg"]
+            # 背景色
+            if task_type == "pending":
+                bg = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["bg"]
+            else:
+                bg = "rgba(52, 199, 89, 0.08)"
             for col in range(3):
                 item.setBackground(col, QColor(bg))
 
@@ -1508,6 +1572,7 @@ class TaskApp(QMainWindow):
 
     def refresh_history_list(self):
         """刷新历史列表"""
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                    完成时间", "创建时间"])
         self.task_list.clear()
 
         source = self.manager.tasks["completed"]
@@ -1769,7 +1834,7 @@ if __name__ == "__main__":
     # Windows 11 任务栏图标修复 - 必须在创建窗口之前调用
     try:
         myappid = 'Dailyinfo.TaskManager.1.0'
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except:
         pass
 
