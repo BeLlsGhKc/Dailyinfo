@@ -7,7 +7,7 @@ import sys
 import json
 import os
 from datetime import datetime, date
-from ctypes import windll, c_int, byref, sizeof, Structure, c_uint, POINTER
+from ctypes import windll, c_int, c_short, byref, sizeof, Structure, c_uint, POINTER, wintypes
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QMessageBox, QDialog,
     QTextEdit, QDateEdit, QHeaderView, QCalendarWidget
 )
-from PySide6.QtCore import Qt, QTimer, QDate
-from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter
+from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect
+from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen
 
 
 # 中国节假日数据（2026年）
@@ -138,6 +138,29 @@ class WINDOWCOMPOSITIONATTRIBDATA(Structure):
     _fields_ = [("Attribute", c_int), ("Data", POINTER(ACCENT_POLICY)),
                 ("SizeOfData", c_uint)]
 
+
+class MSG(Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", wintypes.POINT),
+    ]
+
+
+WM_NCHITTEST = 0x0084
+HTLEFT = 10
+HTRIGHT = 11
+HTTOP = 12
+HTTOPLEFT = 13
+HTTOPRIGHT = 14
+HTBOTTOM = 15
+HTBOTTOMLEFT = 16
+HTBOTTOMRIGHT = 17
+
+
 def enable_blur_behind(hwnd):
     try:
         accent = ACCENT_POLICY()
@@ -196,9 +219,19 @@ class TaskManager:
         return task
 
     def update_task(self, task_id, updates):
+        # 同时查找待办和已完成任务
         for task in self.tasks["pending"]:
             if task["id"] == task_id:
                 task.update(updates)
+                self.save_data()
+                return True
+        for task in self.tasks["completed"]:
+            if task["id"] == task_id:
+                # 保留 completed_at 不被覆盖
+                completed_at = task.get("completed_at")
+                task.update(updates)
+                if completed_at:
+                    task["completed_at"] = completed_at
                 self.save_data()
                 return True
         return False
@@ -283,7 +316,7 @@ class TaskDetailDialog(QDialog):
         container.setStyleSheet("""
             #dialogContainer {
                 background: rgba(255, 255, 255, 0.98);
-                border-radius: 16px;
+                border-radius: 10px;
                 border: 1px solid rgba(0, 0, 0, 0.08);
             }
         """)
@@ -470,7 +503,7 @@ class TaskDetailDialog(QDialog):
             dlg = QDialog(self)
             dlg.setWindowTitle("选择优先级")
             dlg.setFixedSize(260, 180)
-            dlg.setStyleSheet("QDialog { background: rgba(255,255,255,0.98); border-radius: 12px; }")
+            dlg.setStyleSheet("QDialog { background: rgba(255,255,255,0.98); border-radius: 10px; }")
 
             layout = QVBoxLayout(dlg)
             layout.setContentsMargins(20, 16, 20, 16)
@@ -517,7 +550,7 @@ class TaskDetailDialog(QDialog):
             dlg = QDialog(self)
             dlg.setWindowTitle("选择截止日期")
             dlg.setFixedSize(280, 200)
-            dlg.setStyleSheet("QDialog { background: rgba(255,255,255,0.98); border-radius: 12px; }")
+            dlg.setStyleSheet("QDialog { background: rgba(255,255,255,0.98); border-radius: 10px; }")
 
             layout = QVBoxLayout(dlg)
             layout.setContentsMargins(20, 16, 20, 16)
@@ -604,6 +637,46 @@ class TaskDetailDialog(QDialog):
 
 
 # ========== 主应用 ==========
+class WindowControlButton(QPushButton):
+    """绘制型窗口控制按钮，避免字符图标的基线偏移"""
+
+    def __init__(self, icon_type, parent=None):
+        super().__init__(parent)
+        self.icon_type = icon_type
+        self.setFixedSize(28, 28)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_icon_type(self, icon_type):
+        self.icon_type = icon_type
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor("white") if self.objectName() == "closeBtn" and self.underMouse() else QColor("#6e6e73")
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+
+        center_x = self.width() // 2
+        center_y = self.height() // 2
+
+        if self.icon_type == "minimize":
+            painter.drawLine(center_x - 5, center_y + 1, center_x + 5, center_y + 1)
+        elif self.icon_type == "maximize":
+            painter.drawRect(center_x - 4, center_y - 3, 8, 8)
+        elif self.icon_type == "restore":
+            painter.drawRect(center_x - 2, center_y - 3, 7, 7)
+            painter.drawLine(center_x - 5, center_y, center_x - 5, center_y + 6)
+            painter.drawLine(center_x - 5, center_y + 6, center_x + 1, center_y + 6)
+            painter.drawLine(center_x - 5, center_y, center_x - 2, center_y)
+        elif self.icon_type == "close":
+            painter.drawLine(center_x - 5, center_y - 5, center_x + 5, center_y + 5)
+            painter.drawLine(center_x + 5, center_y - 5, center_x - 5, center_y + 5)
+
+
 class TaskApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -611,13 +684,14 @@ class TaskApp(QMainWindow):
         self.searching = False
         self.showing_history = False
 
-        self.setWindowTitle("每日任务管理")
-        self.setFixedSize(1100, 720)
+        self.setWindowTitle("Dailyinfo")
+        self.resize(1100, 720)
+        self.setMinimumSize(900, 600)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
 
         # 设置任务栏图标
-        icon_path = os.path.join(ICO_DIR, "岚兮儿.ico")
+        icon_path = os.path.join(ICO_DIR, "岚兮儿天下无敌好看.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
@@ -630,18 +704,23 @@ class TaskApp(QMainWindow):
         enable_blur_behind(hwnd)
 
     def setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(12, 12, 12, 12)
+        self.central = QWidget()
+        self.central.setMouseTracking(True)
+        self.central.installEventFilter(self)
+        self.setMouseTracking(True)
+        self.setCentralWidget(self.central)
+        self.outer_layout = QVBoxLayout(self.central)
+        self.outer_layout.setContentsMargins(12, 12, 12, 12)
 
         self.glass = QFrame()
         self.glass.setObjectName("glassContainer")
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(30)
-        shadow.setColor(QColor(0, 0, 0, 40))
-        shadow.setOffset(0, 4)
-        self.glass.setGraphicsEffect(shadow)
+        self.glass.setMouseTracking(True)
+        self.glass.installEventFilter(self)
+        self.shadow = QGraphicsDropShadowEffect()
+        self.shadow.setBlurRadius(30)
+        self.shadow.setColor(QColor(0, 0, 0, 40))
+        self.shadow.setOffset(0, 4)
+        self.glass.setGraphicsEffect(self.shadow)
 
         main_layout = QVBoxLayout(self.glass)
         main_layout.setContentsMargins(18, 14, 18, 18)
@@ -658,32 +737,34 @@ class TaskApp(QMainWindow):
         win_row = QHBoxLayout()
         win_row.setContentsMargins(0, 0, 0, 0)
 
-        daily_label = QLabel("Dailyinfo")
-        daily_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #8e8e93;")
+        daily_label = QLabel('<span style="font-size:16px;font-weight:600;color:#4e4e53;">Dailyinfo</span><span style="font-size:14px;font-weight:500;color:#4e4e53;vertical-align:sub;margin-left:4px;"> Trying to do better`</span>')
         win_row.addWidget(daily_label)
 
         win_row.addStretch()
 
-        min_btn = QPushButton("─")
+        # 窗口按钮容器
+        win_btn_container = QWidget()
+        win_btn_container.setObjectName("winBtnContainer")
+        win_btn_layout = QHBoxLayout(win_btn_container)
+        win_btn_layout.setContentsMargins(6, 4, 6, 4)
+        win_btn_layout.setSpacing(6)
+
+        min_btn = WindowControlButton("minimize")
         min_btn.setObjectName("windowBtn")
-        min_btn.setFixedSize(28, 28)
-        min_btn.setCursor(Qt.PointingHandCursor)
         min_btn.clicked.connect(self.showMinimized)
-        win_row.addWidget(min_btn)
+        win_btn_layout.addWidget(min_btn)
 
-        self.max_btn = QPushButton("□")
+        self.max_btn = WindowControlButton("maximize")
         self.max_btn.setObjectName("windowBtn")
-        self.max_btn.setFixedSize(28, 28)
-        self.max_btn.setCursor(Qt.PointingHandCursor)
         self.max_btn.clicked.connect(self.toggle_maximize)
-        win_row.addWidget(self.max_btn)
+        win_btn_layout.addWidget(self.max_btn)
 
-        close_btn = QPushButton("✕")
+        close_btn = WindowControlButton("close")
         close_btn.setObjectName("closeBtn")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.clicked.connect(self.close)
-        win_row.addWidget(close_btn)
+        win_btn_layout.addWidget(close_btn)
+
+        win_row.addWidget(win_btn_container)
 
         header_layout.addLayout(win_row)
 
@@ -692,9 +773,35 @@ class TaskApp(QMainWindow):
         info_row.setContentsMargins(0, 4, 0, 0)
         info_row.setSpacing(12)
 
-        app_label = QLabel("📋 每日任务")
-        app_label.setStyleSheet("font-size: 18px; font-weight: 600; color: #1d1d1f;")
-        info_row.addWidget(app_label)
+        # 标题区域（包含图标和文本）
+        self.app_container = QWidget()
+        app_layout = QHBoxLayout(self.app_container)
+        app_layout.setContentsMargins(0, 0, 0, 0)
+        app_layout.setSpacing(6)
+
+        # 绿色对钩图标（历史页面显示）
+        self.check_icon = QLabel("✓")
+        self.check_icon.setFixedSize(26, 26)
+        self.check_icon.setAlignment(Qt.AlignCenter)
+        self.check_icon.setStyleSheet("""
+            QLabel {
+                background: #34C759;
+                border: 2px solid #2DA44E;
+                border-radius: 5px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
+        self.check_icon.setVisible(False)
+        app_layout.addWidget(self.check_icon)
+
+        # 文本标签
+        self.app_label = QLabel("📋 待办任务")
+        self.app_label.setStyleSheet("font-size: 18px; font-weight: 600; color: #1d1d1f;")
+        app_layout.addWidget(self.app_label)
+
+        info_row.addWidget(self.app_container)
 
         info_row.addStretch()
 
@@ -723,7 +830,7 @@ class TaskApp(QMainWindow):
         weekday_btn.clicked.connect(self.show_calendar)
         info_row.addWidget(weekday_btn)
 
-        self.history_btn = QPushButton("📖 历史")
+        self.history_btn = QPushButton("历史")
         self.history_btn.setObjectName("headerBtn")
         self.history_btn.setCursor(Qt.PointingHandCursor)
         self.history_btn.clicked.connect(self.show_history)
@@ -739,7 +846,7 @@ class TaskApp(QMainWindow):
         toolbar.setStyleSheet("""
             #toolBar {
                 background: rgba(255, 255, 255, 0.6);
-                border-radius: 12px;
+                border-radius: 8px;
                 border: 1px solid rgba(0, 0, 0, 0.08);
             }
         """)
@@ -818,7 +925,12 @@ class TaskApp(QMainWindow):
         add_btn.clicked.connect(self.add_task)
         toolbar_layout.addWidget(add_btn)
 
-        main_layout.addWidget(toolbar)
+        toolbar_wrap = QWidget()
+        toolbar_wrap_layout = QHBoxLayout(toolbar_wrap)
+        toolbar_wrap_layout.setContentsMargins(18, 0, 18, 0)
+        toolbar_wrap_layout.setSpacing(0)
+        toolbar_wrap_layout.addWidget(toolbar)
+        main_layout.addWidget(toolbar_wrap)
 
         # ====== 任务列表 ======
         list_card = QFrame()
@@ -831,7 +943,7 @@ class TaskApp(QMainWindow):
         self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
         self.task_list.setRootIsDecorated(False)
         self.task_list.header().setDefaultAlignment(Qt.AlignLeft)
-        self.task_list.setColumnWidth(0, 80)
+        self.task_list.setColumnWidth(0, 64)
         self.task_list.setColumnWidth(1, 720)
         self.task_list.setColumnWidth(2, 180)
         self.task_list.setIndentation(0)
@@ -862,10 +974,13 @@ class TaskApp(QMainWindow):
 
         main_layout.addWidget(footer)
 
-        outer.addWidget(self.glass)
+        self.outer_layout.addWidget(self.glass)
 
         # 拖拽
         self._drag_pos = None
+        self._resize_edges = set()
+        self._resize_start_pos = None
+        self._resize_start_geometry = None
         header.mousePressEvent = self.header_mouse_press
         header.mouseMoveEvent = self.header_mouse_move
         header.mouseReleaseEvent = self.header_mouse_release
@@ -908,10 +1023,161 @@ class TaskApp(QMainWindow):
     def toggle_maximize(self):
         if self.isMaximized():
             self.showNormal()
-            self.max_btn.setText("□")
         else:
             self.showMaximized()
-            self.max_btn.setText("❐")
+
+    def update_window_button_state(self):
+        """更新最大化按钮图标状态"""
+        self.max_btn.set_icon_type("restore" if self.isMaximized() else "maximize")
+
+    def update_layout_for_maximized(self):
+        """最大化时调整外边距和阴影"""
+        if self.isMaximized():
+            self.outer_layout.setContentsMargins(0, 0, 0, 0)
+            self.shadow.setEnabled(False)
+        else:
+            self.outer_layout.setContentsMargins(12, 12, 12, 12)
+            QTimer.singleShot(80, self.enable_window_shadow)
+
+    def enable_window_shadow(self):
+        """还原窗口后延迟启用阴影，减少状态切换时的重绘卡顿"""
+        if not self.isMaximized():
+            self.shadow.setEnabled(True)
+
+    def changeEvent(self, event):
+        """处理系统快捷键最大化/还原"""
+        if event.type() == event.Type.WindowStateChange:
+            self.update_window_button_state()
+            self.update_layout_for_maximized()
+        super().changeEvent(event)
+
+    def nativeEvent(self, event_type, message):
+        """无边框窗口边缘缩放命中测试"""
+        if event_type == "windows_generic_MSG":
+            msg = MSG.from_address(int(message))
+            if msg.message == WM_NCHITTEST and not self.isMaximized():
+                x = c_short(msg.lParam & 0xFFFF).value
+                y = c_short((msg.lParam >> 16) & 0xFFFF).value
+                rect = self.frameGeometry()
+                border = 8
+
+                on_left = rect.left() <= x < rect.left() + border
+                on_right = rect.right() - border < x <= rect.right()
+                on_top = rect.top() <= y < rect.top() + border
+                on_bottom = rect.bottom() - border < y <= rect.bottom()
+
+                if on_top and on_left:
+                    return True, HTTOPLEFT
+                if on_top and on_right:
+                    return True, HTTOPRIGHT
+                if on_bottom and on_left:
+                    return True, HTBOTTOMLEFT
+                if on_bottom and on_right:
+                    return True, HTBOTTOMRIGHT
+                if on_left:
+                    return True, HTLEFT
+                if on_right:
+                    return True, HTRIGHT
+                if on_top:
+                    return True, HTTOP
+                if on_bottom:
+                    return True, HTBOTTOM
+        return super().nativeEvent(event_type, message)
+
+    def eventFilter(self, obj, event):
+        """处理无边框窗口边缘的手动缩放"""
+        if obj in (getattr(self, "central", None), getattr(self, "glass", None)):
+            if event.type() == QEvent.MouseButtonPress:
+                if self._start_resize(event):
+                    return True
+            elif event.type() == QEvent.MouseMove:
+                if self._resize_edges:
+                    self._perform_resize(event.globalPosition().toPoint())
+                    return True
+                self._update_resize_cursor(event.globalPosition().toPoint())
+            elif event.type() == QEvent.MouseButtonRelease:
+                if self._resize_edges:
+                    self._finish_resize()
+                    return True
+            elif event.type() == QEvent.Leave and not self._resize_edges:
+                self.unsetCursor()
+        return super().eventFilter(obj, event)
+
+    def _resize_edges_at(self, global_pos):
+        """获取鼠标所在的窗口缩放边缘"""
+        if self.isMaximized():
+            return set()
+
+        rect = self.frameGeometry()
+        border = 14
+        edges = set()
+
+        if rect.left() <= global_pos.x() <= rect.left() + border:
+            edges.add("left")
+        elif rect.right() - border <= global_pos.x() <= rect.right():
+            edges.add("right")
+
+        if rect.top() <= global_pos.y() <= rect.top() + border:
+            edges.add("top")
+        elif rect.bottom() - border <= global_pos.y() <= rect.bottom():
+            edges.add("bottom")
+
+        return edges
+
+    def _update_resize_cursor(self, global_pos):
+        """根据边缘位置切换缩放光标"""
+        edges = self._resize_edges_at(global_pos)
+        if {"top", "left"} <= edges or {"bottom", "right"} <= edges:
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif {"top", "right"} <= edges or {"bottom", "left"} <= edges:
+            self.setCursor(Qt.SizeBDiagCursor)
+        elif "left" in edges or "right" in edges:
+            self.setCursor(Qt.SizeHorCursor)
+        elif "top" in edges or "bottom" in edges:
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+    def _start_resize(self, event):
+        """开始边缘缩放"""
+        if event.button() != Qt.LeftButton:
+            return False
+
+        edges = self._resize_edges_at(event.globalPosition().toPoint())
+        if not edges:
+            return False
+
+        self._resize_edges = edges
+        self._resize_start_pos = event.globalPosition().toPoint()
+        self._resize_start_geometry = QRect(self.geometry())
+        return True
+
+    def _perform_resize(self, global_pos):
+        """执行边缘缩放"""
+        if not self._resize_edges or self._resize_start_pos is None:
+            return
+
+        delta = global_pos - self._resize_start_pos
+        geometry = QRect(self._resize_start_geometry)
+        min_width = self.minimumWidth()
+        min_height = self.minimumHeight()
+
+        if "left" in self._resize_edges:
+            geometry.setLeft(min(geometry.left() + delta.x(), geometry.right() - min_width))
+        if "right" in self._resize_edges:
+            geometry.setRight(max(geometry.right() + delta.x(), geometry.left() + min_width))
+        if "top" in self._resize_edges:
+            geometry.setTop(min(geometry.top() + delta.y(), geometry.bottom() - min_height))
+        if "bottom" in self._resize_edges:
+            geometry.setBottom(max(geometry.bottom() + delta.y(), geometry.top() + min_height))
+
+        self.setGeometry(geometry)
+
+    def _finish_resize(self):
+        """结束边缘缩放"""
+        self._resize_edges = set()
+        self._resize_start_pos = None
+        self._resize_start_geometry = None
 
     def show_calendar(self):
         """显示日历弹窗"""
@@ -921,7 +1187,7 @@ class TaskApp(QMainWindow):
         dlg.setStyleSheet("""
             QDialog {
                 background: rgba(255,255,255,0.98);
-                border-radius: 12px;
+                border-radius: 10px;
             }
         """)
 
@@ -1053,30 +1319,30 @@ class TaskApp(QMainWindow):
     def show_history(self):
         """显示历史页面"""
         if self.showing_history:
-            # 返回主页
-            self.showing_history = False
-            self.history_btn.setText("📖 历史")
-            self.history_btn.setStyleSheet("""
-                QPushButton {
-                    background: rgba(0, 122, 255, 0.1);
-                    color: #007AFF;
-                    border: 1px solid rgba(0, 122, 255, 0.2);
-                    border-radius: 8px;
-                    padding: 6px 14px;
-                    font-size: 12px;
-                    font-weight: 500;
-                }
-                QPushButton:hover {
-                    background: rgba(0, 122, 255, 0.18);
-                }
-            """)
-            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
-            self.refresh_task_list()
+            self.go_to_main()
         else:
             # 显示历史
             self.showing_history = True
             self.searching = False
-            self.history_btn.setText("⬅️ 返回")
+            self.check_icon.setVisible(True)
+            self.app_label.setText("已完成任务")
+            self.search_btn.setText("搜索")
+            self.search_btn.setStyleSheet("""
+                QPushButton {
+                    background: #007AFF;
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: #0056CC;
+                }
+            """)
+            self.task_input.clear()
+            self.task_input.setPlaceholderText("输入内容")
+            self.history_btn.setText("返回")
             self.history_btn.setStyleSheet("""
                 QPushButton {
                     background: rgba(142, 142, 147, 0.1);
@@ -1094,8 +1360,48 @@ class TaskApp(QMainWindow):
             self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                    完成时间", "创建时间"])
             self.refresh_history_list()
 
+    def go_to_main(self):
+        """回到主页面"""
+        self.showing_history = False
+        self.searching = False
+        self.check_icon.setVisible(False)
+        self.app_label.setText("📋 待办任务")
+        self.history_btn.setText("历史")
+        self.history_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 122, 255, 0.1);
+                color: #007AFF;
+                border: 1px solid rgba(0, 122, 255, 0.2);
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: rgba(0, 122, 255, 0.18);
+            }
+        """)
+        self.search_btn.setText("搜索")
+        self.search_btn.setStyleSheet("""
+            QPushButton {
+                background: #007AFF;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #0056CC;
+            }
+        """)
+        self.task_input.clear()
+        self.task_input.setPlaceholderText("输入内容")
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
+        self.refresh_task_list()
+
     def header_mouse_press(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and not self.isMaximized():
             self._drag_pos = event.globalPosition().toPoint() - self.pos()
 
     def header_mouse_move(self, event):
@@ -1113,35 +1419,20 @@ class TaskApp(QMainWindow):
                 results = self.manager.search_tasks(keyword)
                 self.refresh_search_list(results)
             else:
-                self.searching = False
-                self.refresh_task_list()
+                self.go_to_main()
 
     def on_search_btn_click(self):
         """搜索按钮点击"""
         if self.searching:
-            # 返回
-            self.search_btn.setText("搜索")
-            self.search_btn.setStyleSheet("""
-                QPushButton {
-                    background: #007AFF;
-                    color: white;
-                    border: none;
-                    border-radius: 8px;
-                    font-size: 13px;
-                    font-weight: 500;
-                }
-                QPushButton:hover {
-                    background: #0056CC;
-                }
-            """)
-            self.task_input.clear()
-            self.task_input.setPlaceholderText("输入内容")
-            self.searching = False
-            self.refresh_task_list()
+            self.go_to_main()
         else:
             # 执行搜索
             keyword = self.task_input.text().strip()
             if keyword:
+                self.searching = True
+                self.showing_history = False
+                self.check_icon.setVisible(False)
+                self.app_label.setText("🔍 搜索结果")
                 self.search_btn.setText("返回")
                 self.search_btn.setStyleSheet("""
                     QPushButton {
@@ -1156,8 +1447,22 @@ class TaskApp(QMainWindow):
                         background: #636366;
                     }
                 """)
+                self.history_btn.setText("历史")
+                self.history_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(0, 122, 255, 0.1);
+                        color: #007AFF;
+                        border: 1px solid rgba(0, 122, 255, 0.2);
+                        border-radius: 8px;
+                        padding: 6px 14px;
+                        font-size: 12px;
+                        font-weight: 500;
+                    }
+                    QPushButton:hover {
+                        background: rgba(0, 122, 255, 0.18);
+                    }
+                """)
                 self.task_input.setPlaceholderText("搜索中...")
-                self.searching = True
                 results = self.manager.search_tasks(keyword)
                 self.refresh_search_list(results)
 
@@ -1178,6 +1483,8 @@ class TaskApp(QMainWindow):
 
         if priority == "计划":
             deadline = self._pick_deadline()
+            if not deadline:
+                return  # 用户取消了选择，不创建任务
 
         self.manager.add_task(title, priority, task_type, deadline=deadline)
         self.task_input.clear()
@@ -1192,7 +1499,7 @@ class TaskApp(QMainWindow):
         dlg.setStyleSheet("""
             QDialog {
                 background: rgba(255,255,255,0.98);
-                border-radius: 12px;
+                border-radius: 10px;
             }
         """)
         layout = QVBoxLayout(dlg)
@@ -1288,6 +1595,11 @@ class TaskApp(QMainWindow):
             else:
                 self.refresh_task_list()
 
+        # 清除选中态，焦点回到输入框
+        self.task_list.clearSelection()
+        self.task_list.setCurrentItem(None)
+        self.task_input.setFocus()
+
     def _find_task(self, task_id):
         """查找任务（包括待办和历史）"""
         for task in self.manager.tasks["pending"]:
@@ -1360,15 +1672,15 @@ class TaskApp(QMainWindow):
             # 完成方块容器（居中偏下）
             check_container = QWidget()
             check_layout = QHBoxLayout(check_container)
-            check_layout.setContentsMargins(0, 8, 0, 0)
-            check_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            check_layout.setContentsMargins(2, 8, 0, 0)
+            check_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             check_layout.addWidget(check_btn)
             self.task_list.setItemWidget(item, 0, check_container)
 
             # 任务内容
             content_widget = QWidget()
             content_layout = QHBoxLayout(content_widget)
-            content_layout.setContentsMargins(12, 0, 8, 0)
+            content_layout.setContentsMargins(4, 0, 8, 0)
             content_layout.setSpacing(10)
 
             dot_color = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["color"]
@@ -1390,6 +1702,7 @@ class TaskApp(QMainWindow):
                     if deadline < today:
                         is_expired_plan = True
             else:
+                title = f"📝 {title}"
                 # 普通任务检查是否过了当天
                 created_date = task["created_at"][:10]  # 取日期部分
                 if created_date < today:
@@ -1417,10 +1730,10 @@ class TaskApp(QMainWindow):
             # 时间
             if is_expired_normal:
                 time_label = QLabel(task["created_at"])
-                time_label.setStyleSheet("color: #FF3B30; font-size: 12px; font-weight: 600; background: transparent; border: none;")
+                time_label.setStyleSheet("color: #FF3B30; font-size: 12px; font-weight: 600; background: transparent; border: none; padding-right: 12px;")
             else:
                 time_label = QLabel(task["created_at"])
-                time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
+                time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
             self.task_list.setItemWidget(item, 2, time_label)
 
             # 统一背景色（计划任务过期整栏变红）
@@ -1478,8 +1791,8 @@ class TaskApp(QMainWindow):
 
                 check_container = QWidget()
                 check_layout = QHBoxLayout(check_container)
-                check_layout.setContentsMargins(0, 8, 0, 0)
-                check_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                check_layout.setContentsMargins(2, 8, 0, 0)
+                check_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
                 check_layout.addWidget(check_btn)
                 self.task_list.setItemWidget(item, 0, check_container)
             else:
@@ -1506,15 +1819,15 @@ class TaskApp(QMainWindow):
 
                 btn_container = QWidget()
                 btn_layout = QHBoxLayout(btn_container)
-                btn_layout.setContentsMargins(0, 8, 0, 0)
-                btn_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                btn_layout.setContentsMargins(2, 8, 0, 0)
+                btn_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
                 btn_layout.addWidget(uncheck_btn)
                 self.task_list.setItemWidget(item, 0, btn_container)
 
             # 任务内容
             content_widget = QWidget()
             content_layout = QHBoxLayout(content_widget)
-            content_layout.setContentsMargins(12, 0, 8, 0)
+            content_layout.setContentsMargins(4, 0, 8, 0)
             content_layout.setSpacing(10)
 
             dot_color = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["color"]
@@ -1527,6 +1840,8 @@ class TaskApp(QMainWindow):
             title = task["title"]
             if task["type"] == "计划任务":
                 title = f"📅 {title}"
+            else:
+                title = f"📝 {title}"
 
             title_label = QLabel(title)
             title_label.setStyleSheet("color: #1d1d1f; font-size: 14px; background: transparent; border: none;")
@@ -1557,7 +1872,7 @@ class TaskApp(QMainWindow):
 
             # 创建时间
             time_label = QLabel(task["created_at"])
-            time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none;")
+            time_label.setStyleSheet("color: #8e8e93; font-size: 12px; background: transparent; border: none; padding-right: 12px;")
             self.task_list.setItemWidget(item, 2, time_label)
 
             # 背景色
@@ -1613,15 +1928,15 @@ class TaskApp(QMainWindow):
             # 按钮容器（居中）
             btn_container = QWidget()
             btn_layout = QHBoxLayout(btn_container)
-            btn_layout.setContentsMargins(0, 8, 0, 0)
-            btn_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            btn_layout.setContentsMargins(2, 8, 0, 0)
+            btn_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             btn_layout.addWidget(uncheck_btn)
             self.task_list.setItemWidget(item, 0, btn_container)
 
             # 任务内容
             content_widget = QWidget()
             content_layout = QHBoxLayout(content_widget)
-            content_layout.setContentsMargins(8, 0, 8, 0)
+            content_layout.setContentsMargins(4, 0, 8, 0)
             content_layout.setSpacing(10)
 
             priority = task["priority"]
@@ -1635,6 +1950,8 @@ class TaskApp(QMainWindow):
             title = task["title"]
             if task["type"] == "计划任务":
                 title = f"📅 {title}"
+            else:
+                title = f"📝 {title}"
 
             title_label = QLabel(title)
             title_label.setStyleSheet("color: #1d1d1f; font-size: 14px; background: transparent; border: none;")
@@ -1697,13 +2014,13 @@ QWidget { font-family: "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-
 
 #glassContainer {
     background: rgba(255, 255, 255, 0.99999999);
-    border-radius: 18px;
+    border-radius: 10px;
     border: 1px solid rgba(0, 0, 0, 0.12);
 }
 
 #header {
     background: rgba(255, 255, 255, 0.7);
-    border-radius: 14px;
+    border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.8);
 }
 
@@ -1719,32 +2036,34 @@ QWidget { font-family: "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-
     font-weight: 500;
 }
 
+#winBtnContainer {
+    background: rgba(255, 255, 255, 0.4);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+}
+
 #windowBtn {
     background: transparent;
     border: none;
     border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 14px;
+    font-size: 13px;
+    font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
     color: #6e6e73;
-    min-width: 28px;
-    min-height: 28px;
 }
 #windowBtn:hover {
-    background: rgba(0, 0, 0, 0.06);
+    background: rgba(0, 0, 0, 0.08);
 }
 
 #closeBtn {
     background: transparent;
     border: none;
     border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 14px;
+    font-size: 13px;
+    font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
     color: #6e6e73;
-    min-width: 28px;
-    min-height: 28px;
 }
 #closeBtn:hover {
-    background: #FF3B30;
+    background: rgba(255, 59, 48, 0.8);
     color: white;
 }
 
@@ -1775,7 +2094,7 @@ QWidget { font-family: "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-
 
 #card {
     background: rgba(255, 255, 255, 0.65);
-    border-radius: 14px;
+    border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.75);
 }
 
@@ -1787,7 +2106,7 @@ QTreeWidget {
     outline: none;
 }
 QTreeWidget::item {
-    border-radius: 10px;
+    border-radius: 6px;
     padding: 8px 14px;
     margin: 3px 4px;
     min-height: 40px;
@@ -1841,7 +2160,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
 
-    icon_path = os.path.join(ICO_DIR, "岚兮儿.ico")
+    icon_path = os.path.join(ICO_DIR, "岚兮儿天下无敌好看.ico")
     app_icon = QIcon(icon_path) if os.path.exists(icon_path) else None
     if app_icon:
         app.setWindowIcon(app_icon)
