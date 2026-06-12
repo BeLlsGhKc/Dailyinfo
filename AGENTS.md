@@ -1,45 +1,79 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+本文档用于指导 Codex 在本仓库内工作。
+
+## 基本约束
+
+- 始终使用中文回复、中文文档和中文提交信息。
+- 不要擅自修改用户配置文件，除非用户明确要求。
+- 涉及删除、覆盖、批量移动等不可逆操作前，必须先确认。
+- 不要执行可能损坏数据的操作，除非用户明确确认。
+- 不要回退用户已有改动；遇到无关改动时保持原样。
+- 文件路径在沟通中优先使用绝对路径。
+- 所有 SQL 相关语句、解释和语法统一使用小写。
+- 不使用上标字符，平方写成 `x^2`，Python 代码写成 `x**2`。
 
 ## 项目概述
 
-每日任务管理工具 - 一款 Windows 桌面应用，采用苹果毛玻璃风格（PySide6 + Windows blur API）。
+Dailyinfo 是 Windows 桌面每日任务管理工具，使用 PySide6 开发，界面采用无边框窗口、圆角容器、毛玻璃效果和自绘窗口控制按钮。
+
+主程序是单文件应用：
+
+```text
+Code/daily_tasks.py
+```
 
 ## 常用命令
 
 ```bash
-# 源码运行
 python Code/daily_tasks.py
+```
 
-# 打包 exe
-python -m PyInstaller 每日任务管理.spec --clean
-
-# 安装依赖
+```bash
 pip install PySide6 pyinstaller
 ```
 
-## 架构
+```bash
+python -m PyInstaller 每日任务管理.spec --clean
+```
 
-单文件应用：`Code/daily_tasks.py`
+## 主要模块
 
-- **TaskManager** - 数据层，管理 tasks.json 的增删改查
-- **TaskApp(QMainWindow)** - 主界面，包含任务列表、搜索、工具栏
-- **TaskDetailDialog(QDialog)** - 任务详情弹窗，支持编辑/完成/删除/转换类型
-- **HolidayCalendar(QCalendarWidget)** - 带中国节假日高亮的日历组件
+- `TaskManager`：任务数据层，负责读取、保存、添加、更新、完成、取消完成、删除和搜索任务。
+- `TaskApp`：主窗口，负责待办页、搜索页、历史页、工具栏、日历弹窗、窗口拖动和缩放。
+- `TaskDetailDialog`：任务详情页，负责任务编辑、保存、完成、删除和类型转换。
+- `HolidayCalendar`：日历控件，负责日期绘制、节假日、节气、农历和调休上班日显示。
+- `WindowControlButton`：自绘窗口按钮，负责最小化、最大化、还原和关闭图标绘制。
 
-数据存储在 exe 同级目录的 `Data/tasks.json`，打包后通过 `sys._MEIPASS` 读取内置资源（图标），通过 `os.path.dirname(sys.executable)` 定位数据目录。
+## 数据和资源
 
-## 打包注意事项
+- 任务数据：`Data/tasks.json`
+- 图标文件：`Ico/岚兮儿天下无敌好看.ico`
+- 打包配置：`每日任务管理.spec`
+- 打包资源必须包含图标：
 
-- `spec` 文件中 `datas` 需包含图标：`datas=[('Ico\\岚兮儿.ico', 'Ico')]`
-- `SetCurrentProcessExplicitAppUserModelID` 必须在 `QApplication` 创建前调用，否则任务栏图标不显示
-- 打包后路径判断：`getattr(sys, 'frozen', False)` 区分开发/打包环境
+```python
+datas=[('Ico/岚兮儿天下无敌好看.ico', 'Ico')]
+```
 
-## 语言
+打包后通过 `getattr(sys, 'frozen', False)` 区分开发环境和 exe 环境；图标资源从 `sys._MEIPASS` 读取，任务数据保存在 exe 同级目录。
 
-使用中文编写注释、commit 信息、UI 文本。变量名和函数名使用英文。
+## UI 维护原则
 
-## UI 区块命名
+- UI 文本使用中文。
+- 变量名和函数名使用英文。
+- 注释用中文，且只解释不明显的逻辑。
+- 控件圆角层级保持一致：大容器约 `10px`，普通按钮和输入框约 `8px`，小图标按钮约 `6px`。
+- 按钮默认不接收键盘焦点，避免点击后出现虚线焦点框。
+- 任务详情页打开后保留正文自动聚焦，方便立即编辑。
+- 详情页关闭后不要强制聚焦输入框，避免视觉跳动。
 
-UI 区块的统一命名参见 [docs/ui_terms.md](docs/ui_terms.md)。
+## 页面和区块命名
+
+统一命名参见：
+
+```text
+docs/ui_terms.md
+```
+
+修改界面时优先沿用该文档中的名称。

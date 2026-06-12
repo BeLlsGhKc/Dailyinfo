@@ -19,23 +19,35 @@ from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect
 from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen
 
 
+def clean_button_focus(button):
+    """关闭按钮键盘焦点框，避免鼠标点击后留下虚线残影。"""
+    button.setFocusPolicy(Qt.NoFocus)
+    button.setAutoDefault(False)
+    button.setDefault(False)
+    return button
+
+
 # 中国节假日数据（2026年）
 # 正日子显示节日名，其他假期日显示"节日名假期"
 HOLIDAYS = {
     # 元旦
     "2026-01-01": "元旦",
+    "2026-01-02": "元旦假期",
+    "2026-01-03": "元旦假期",
     # 春节
-    "2026-02-17": "除夕",
-    "2026-02-18": "春节",
+    "2026-02-15": "春节假期",
+    "2026-02-16": "春节假期",
+    "2026-02-17": "春节",
+    "2026-02-18": "春节假期",
     "2026-02-19": "春节假期",
     "2026-02-20": "春节假期",
     "2026-02-21": "春节假期",
     "2026-02-22": "春节假期",
     "2026-02-23": "春节假期",
     # 清明节
+    "2026-04-04": "清明节假期",
     "2026-04-05": "清明节",
     "2026-04-06": "清明节假期",
-    "2026-04-07": "清明节假期",
     # 劳动节
     "2026-05-01": "劳动节",
     "2026-05-02": "劳动节假期",
@@ -61,6 +73,261 @@ HOLIDAYS = {
 }
 
 
+ADJUSTED_WORKDAYS = {
+    "2026-01-04": "调休上班",
+    "2026-02-14": "调休上班",
+    "2026-02-28": "调休上班",
+    "2026-05-09": "调休上班",
+    "2026-09-20": "调休上班",
+    "2026-10-10": "调休上班",
+}
+
+
+SOLAR_FESTIVALS = {
+    (2, 14): "情人节",
+    (3, 8): "妇女节",
+    (3, 12): "植树节",
+    (4, 1): "愚人节",
+    (5, 4): "青年节",
+    (6, 1): "儿童节",
+    (9, 10): "教师节",
+    (10, 31): "万圣夜",
+    (12, 24): "平安夜",
+    (12, 25): "圣诞节",
+}
+
+
+SOLAR_TERMS = {
+    "2026-01-05": "小寒",
+    "2026-01-20": "大寒",
+    "2026-02-04": "立春",
+    "2026-02-18": "雨水",
+    "2026-03-05": "惊蛰",
+    "2026-03-20": "春分",
+    "2026-04-05": "清明",
+    "2026-04-20": "谷雨",
+    "2026-05-05": "立夏",
+    "2026-05-21": "小满",
+    "2026-06-05": "芒种",
+    "2026-06-21": "夏至",
+    "2026-07-07": "小暑",
+    "2026-07-23": "大暑",
+    "2026-08-07": "立秋",
+    "2026-08-23": "处暑",
+    "2026-09-07": "白露",
+    "2026-09-23": "秋分",
+    "2026-10-08": "寒露",
+    "2026-10-23": "霜降",
+    "2026-11-07": "立冬",
+    "2026-11-22": "小雪",
+    "2026-12-07": "大雪",
+    "2026-12-22": "冬至",
+}
+
+
+LUNAR_YEAR_INFO = {
+    2024: 0x04b60,
+    2025: 0x0a6e6,
+    2026: 0x0a4e0,
+    2027: 0x0d260,
+}
+LUNAR_BASE_DATE = date(2024, 2, 10)  # 甲辰年正月初一
+HEAVENLY_STEMS = "甲乙丙丁戊己庚辛壬癸"
+EARTHLY_BRANCHES = "子丑寅卯辰巳午未申酉戌亥"
+LUNAR_MONTH_NAMES = ["正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月"]
+LUNAR_DAY_NAMES = [
+    "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
+    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+    "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
+]
+LUNAR_FESTIVALS = {
+    (1, 1): "春节",
+    (1, 15): "元宵节",
+    (2, 2): "龙抬头",
+    (5, 5): "端午节",
+    (7, 7): "七夕",
+    (7, 15): "中元节",
+    (8, 15): "中秋节",
+    (9, 9): "重阳节",
+    (12, 8): "腊八节",
+}
+
+
+def lunar_leap_month(year):
+    """返回农历闰月，0 表示无闰月。"""
+    return LUNAR_YEAR_INFO[year] & 0xF
+
+
+def lunar_leap_days(year):
+    """返回农历闰月天数。"""
+    if lunar_leap_month(year) == 0:
+        return 0
+    return 30 if LUNAR_YEAR_INFO[year] & 0x10000 else 29
+
+
+def lunar_month_days(year, month):
+    """返回农历指定月份天数。"""
+    return 30 if LUNAR_YEAR_INFO[year] & (0x10000 >> month) else 29
+
+
+def lunar_year_days(year):
+    """返回农历年份总天数。"""
+    total = 0
+    for month in range(1, 13):
+        total += lunar_month_days(year, month)
+    return total + lunar_leap_days(year)
+
+
+def solar_to_lunar(solar_date):
+    """把公历日期转换为 2025-2027 日历范围内的农历日期。"""
+    offset = (solar_date - LUNAR_BASE_DATE).days
+    if offset < 0:
+        return None
+
+    lunar_year = 2024
+    while lunar_year in LUNAR_YEAR_INFO:
+        year_days = lunar_year_days(lunar_year)
+        if offset < year_days:
+            break
+        offset -= year_days
+        lunar_year += 1
+
+    if lunar_year not in LUNAR_YEAR_INFO:
+        return None
+
+    leap_month = lunar_leap_month(lunar_year)
+    lunar_month = 1
+    is_leap_month = False
+
+    while lunar_month <= 12:
+        month_days = lunar_leap_days(lunar_year) if is_leap_month else lunar_month_days(lunar_year, lunar_month)
+        if offset < month_days:
+            return {
+                "year": lunar_year,
+                "month": lunar_month,
+                "day": offset + 1,
+                "is_leap_month": is_leap_month,
+            }
+
+        offset -= month_days
+        if leap_month == lunar_month and not is_leap_month:
+            is_leap_month = True
+        else:
+            is_leap_month = False
+            lunar_month += 1
+
+    return None
+
+
+def lunar_ganzhi_year(year):
+    """返回农历干支年。"""
+    return f"{HEAVENLY_STEMS[(year - 4) % 10]}{EARTHLY_BRANCHES[(year - 4) % 12]}"
+
+
+def format_lunar_info(lunar_info):
+    """格式化农历信息。"""
+    month_name = LUNAR_MONTH_NAMES[lunar_info["month"] - 1]
+    if lunar_info["is_leap_month"]:
+        month_name = f"闰{month_name}"
+    day_name = LUNAR_DAY_NAMES[lunar_info["day"] - 1]
+    return f"{lunar_ganzhi_year(lunar_info['year'])}年 农历 {month_name}{day_name}"
+
+
+def add_calendar_label(labels, name, kind):
+    """追加日历标签，避免重复显示。"""
+    if not name:
+        return
+    for existing_name, _ in labels:
+        if existing_name == name:
+            return
+    labels.append((name, kind))
+
+
+def nth_weekday_of_month(year, month, weekday, nth):
+    """返回某月第 nth 个 weekday 日期，weekday 使用 Python 标准：周一为 0。"""
+    current = date(year, month, 1)
+    offset = (weekday - current.weekday()) % 7
+    return current.replace(day=1 + offset + (nth - 1) * 7)
+
+
+def solar_weekday_festival(solar_date):
+    """返回按第几个星期几计算的公历节日。"""
+    if solar_date == nth_weekday_of_month(solar_date.year, 5, 6, 2):
+        return "母亲节"
+    if solar_date == nth_weekday_of_month(solar_date.year, 6, 6, 3):
+        return "父亲节"
+    return ""
+
+
+def has_equivalent_label(labels, name):
+    """判断是否已有等价标签，例如清明节已覆盖清明。"""
+    for existing_name, _ in labels:
+        if existing_name == name or existing_name == f"{name}节":
+            return True
+    return False
+
+
+def calendar_day_labels(solar_date, lunar_info):
+    """返回节日、节气、假期和调休标签。"""
+    date_str = solar_date.strftime("%Y-%m-%d")
+    labels = []
+
+    add_calendar_label(labels, ADJUSTED_WORKDAYS.get(date_str, ""), "workday")
+    add_calendar_label(labels, HOLIDAYS.get(date_str, ""), "holiday")
+
+    if not lunar_info["is_leap_month"]:
+        festival = LUNAR_FESTIVALS.get((lunar_info["month"], lunar_info["day"]))
+        if festival:
+            add_calendar_label(labels, festival, "festival")
+
+    add_calendar_label(labels, SOLAR_FESTIVALS.get((solar_date.month, solar_date.day), ""), "festival")
+    add_calendar_label(labels, solar_weekday_festival(solar_date), "festival")
+
+    solar_term = SOLAR_TERMS.get(date_str, "")
+    if solar_term and not has_equivalent_label(labels, solar_term):
+        add_calendar_label(labels, solar_term, "solar_term")
+
+    return labels
+
+
+def calendar_label_for_qdate(qdate):
+    """返回 qdate 对应的节日、节气、假期和调休标签。"""
+    solar_date = date(qdate.year(), qdate.month(), qdate.day())
+    lunar_info = solar_to_lunar(solar_date)
+    if lunar_info is None:
+        date_str = qdate.toString("yyyy-MM-dd")
+        labels = []
+        add_calendar_label(labels, ADJUSTED_WORKDAYS.get(date_str, ""), "workday")
+        add_calendar_label(labels, HOLIDAYS.get(date_str, ""), "holiday")
+        add_calendar_label(labels, SOLAR_TERMS.get(date_str, ""), "solar_term")
+        return labels
+    return calendar_day_labels(solar_date, lunar_info)
+
+
+def format_calendar_info(qdate):
+    """返回底部日历信息文本和是否带节日标签。"""
+    solar_date = date(qdate.year(), qdate.month(), qdate.day())
+    lunar_info = solar_to_lunar(solar_date)
+    if lunar_info is None:
+        return "农历信息暂不支持", []
+
+    labels = calendar_day_labels(solar_date, lunar_info)
+    text = format_lunar_info(lunar_info)
+    if labels:
+        label_text = " ".join(name for name, _ in labels)
+        return f"{text} {label_text}", [kind for _, kind in labels]
+    return text, []
+
+
+def calendar_info_style(label_kinds):
+    """底部日历信息样式。"""
+    if "workday" in label_kinds:
+        return "color: #C76A00; font-size: 14px; font-weight: 600; padding: 8px;"
+    if label_kinds:
+        return "color: #00C7BE; font-size: 14px; font-weight: 600; padding: 8px;"
+    return "color: #8e8e93; font-size: 13px; font-weight: 500; padding: 8px;"
+
+
 class HolidayCalendar(QCalendarWidget):
     """带节假日高亮的日历控件"""
 
@@ -70,12 +337,15 @@ class HolidayCalendar(QCalendarWidget):
         self.setMaximumDate(QDate(2027, 12, 31))
         self.setSelectedDate(QDate.currentDate())
 
-    def paintCell(self, painter, rect, date):
+    def paintCell(self, painter, rect, qdate):
         """自定义单元格绘制"""
-        date_str = date.toString("yyyy-MM-dd")
-        is_today = date == QDate.currentDate()
-        is_selected = date == self.selectedDate()
-        is_holiday = date_str in HOLIDAYS
+        is_today = qdate == QDate.currentDate()
+        is_selected = qdate == self.selectedDate()
+        labels = calendar_label_for_qdate(qdate)
+        label_names = [name for name, _ in labels]
+        label_kinds = [kind for _, kind in labels]
+        is_workday = "workday" in label_kinds
+        is_holiday = bool(labels)
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -93,23 +363,26 @@ class HolidayCalendar(QCalendarWidget):
             painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 6, 6)
             text_color = QColor(29, 29, 31)
         elif is_holiday:
-            # 节假日：半透明青色背景
-            color = QColor(0, 199, 190, 40)
+            # 节假日、节气、调休工作日：轻色背景区分状态
+            color = QColor(255, 149, 0, 40) if is_workday else QColor(0, 199, 190, 40)
             painter.setBrush(color)
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
-            holiday_name = HOLIDAYS[date_str]
-            if not holiday_name.endswith("假期"):
+            if is_workday:
+                text_color = QColor(199, 106, 0)  # 橙色（调休上班）
+            elif any(kind == "festival" for kind in label_kinds) or any(not name.endswith("假期") and kind == "holiday" for name, kind in labels):
                 text_color = QColor(255, 59, 48)  # 红色（正日子）
+            elif label_names:
+                text_color = QColor(0, 199, 190)  # 青色（假期日、节气）
             else:
-                text_color = QColor(0, 199, 190)  # 青色（假期日）
+                text_color = QColor(29, 29, 31)
         else:
             # 普通日期
             text_color = QColor(29, 29, 31)
 
         # 绘制日期文字
         painter.setPen(text_color)
-        painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+        painter.drawText(rect, Qt.AlignCenter, str(qdate.day()))
         painter.restore()
 
 
@@ -339,6 +612,7 @@ class TaskDetailDialog(QDialog):
         header.addStretch()
 
         close_btn = QPushButton("✕")
+        clean_button_focus(close_btn)
         close_btn.setStyleSheet("""
             QPushButton {
                 background: transparent; border: none;
@@ -464,6 +738,7 @@ class TaskDetailDialog(QDialog):
 
     def _btn(self, text, bg, hover):
         btn = QPushButton(text)
+        clean_button_focus(btn)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background: {bg}; color: white; border: none;
@@ -519,6 +794,7 @@ class TaskDetailDialog(QDialog):
             for priority in ["高", "中", "低"]:
                 cfg = PRIORITY_CONFIG[priority]
                 btn = QPushButton(priority)
+                clean_button_focus(btn)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background: {cfg['color']}; color: white; border: none;
@@ -533,6 +809,7 @@ class TaskDetailDialog(QDialog):
             layout.addLayout(btn_layout)
 
             cancel_btn = QPushButton("取消")
+            clean_button_focus(cancel_btn)
             cancel_btn.setStyleSheet("""
                 QPushButton {
                     background: rgba(0,0,0,0.05); border: none;
@@ -576,6 +853,7 @@ class TaskDetailDialog(QDialog):
             btn_layout.setSpacing(8)
 
             cancel_btn = QPushButton("取消")
+            clean_button_focus(cancel_btn)
             cancel_btn.setStyleSheet("""
                 QPushButton {
                     background: rgba(0,0,0,0.05); border: none;
@@ -588,6 +866,7 @@ class TaskDetailDialog(QDialog):
             btn_layout.addWidget(cancel_btn)
 
             ok_btn = QPushButton("确定")
+            clean_button_focus(ok_btn)
             ok_btn.setStyleSheet("""
                 QPushButton {
                     background: #007AFF; color: white; border: none;
@@ -642,6 +921,7 @@ class WindowControlButton(QPushButton):
 
     def __init__(self, icon_type, parent=None):
         super().__init__(parent)
+        clean_button_focus(self)
         self.icon_type = icon_type
         self.setFixedSize(28, 28)
         self.setCursor(Qt.PointingHandCursor)
@@ -689,6 +969,7 @@ class TaskApp(QMainWindow):
         self.setMinimumSize(900, 600)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         # 设置任务栏图标
         icon_path = os.path.join(ICO_DIR, "岚兮儿天下无敌好看.ico")
@@ -745,19 +1026,24 @@ class TaskApp(QMainWindow):
         # 窗口按钮容器
         win_btn_container = QWidget()
         win_btn_container.setObjectName("winBtnContainer")
+        win_btn_container.setFixedWidth(125)
         win_btn_layout = QHBoxLayout(win_btn_container)
         win_btn_layout.setContentsMargins(6, 4, 6, 4)
-        win_btn_layout.setSpacing(6)
+        win_btn_layout.setSpacing(0)
 
         min_btn = WindowControlButton("minimize")
         min_btn.setObjectName("windowBtn")
         min_btn.clicked.connect(self.showMinimized)
         win_btn_layout.addWidget(min_btn)
 
+        win_btn_layout.addStretch()
+
         self.max_btn = WindowControlButton("maximize")
         self.max_btn.setObjectName("windowBtn")
         self.max_btn.clicked.connect(self.toggle_maximize)
         win_btn_layout.addWidget(self.max_btn)
+
+        win_btn_layout.addStretch()
 
         close_btn = WindowControlButton("close")
         close_btn.setObjectName("closeBtn")
@@ -776,7 +1062,7 @@ class TaskApp(QMainWindow):
         # 标题区域（包含图标和文本）
         self.app_container = QWidget()
         app_layout = QHBoxLayout(self.app_container)
-        app_layout.setContentsMargins(0, 0, 0, 0)
+        app_layout.setContentsMargins(8, 0, 0, 0)
         app_layout.setSpacing(6)
 
         # 绿色对钩图标（历史页面显示）
@@ -811,8 +1097,11 @@ class TaskApp(QMainWindow):
         info_row.addWidget(date_label)
 
         weekday_btn = QPushButton(WEEKDAYS[now.weekday()][:3])
+        clean_button_focus(weekday_btn)
         weekday_btn.setObjectName("weekdayLabel")
         weekday_btn.setCursor(Qt.PointingHandCursor)
+        weekday_btn.setFixedHeight(34)
+        weekday_btn.setMinimumWidth(56)
         weekday_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -820,8 +1109,8 @@ class TaskApp(QMainWindow):
                 color: #007AFF;
                 font-size: 13px;
                 font-weight: 500;
-                padding: 4px 8px;
-                border-radius: 6px;
+                padding: 6px 14px;
+                border-radius: 8px;
             }
             QPushButton:hover {
                 background: rgba(0, 122, 255, 0.08);
@@ -831,6 +1120,7 @@ class TaskApp(QMainWindow):
         info_row.addWidget(weekday_btn)
 
         self.history_btn = QPushButton("历史")
+        clean_button_focus(self.history_btn)
         self.history_btn.setObjectName("headerBtn")
         self.history_btn.setCursor(Qt.PointingHandCursor)
         self.history_btn.clicked.connect(self.show_history)
@@ -846,7 +1136,7 @@ class TaskApp(QMainWindow):
         toolbar.setStyleSheet("""
             #toolBar {
                 background: rgba(255, 255, 255, 0.6);
-                border-radius: 8px;
+                border-radius: 10px;
                 border: 1px solid rgba(0, 0, 0, 0.08);
             }
         """)
@@ -878,6 +1168,7 @@ class TaskApp(QMainWindow):
 
         # 搜索按钮
         self.search_btn = QPushButton("搜索")
+        clean_button_focus(self.search_btn)
         self.search_btn.setCursor(Qt.PointingHandCursor)
         self.search_btn.setFixedHeight(42)
         self.search_btn.setMinimumWidth(52)
@@ -904,6 +1195,7 @@ class TaskApp(QMainWindow):
         for label in ["计划", "高", "中", "低"]:
             cfg = PRIORITY_CONFIG[label]
             btn = QPushButton(label)
+            clean_button_focus(btn)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setCheckable(True)
             btn.setFixedHeight(42)
@@ -918,6 +1210,7 @@ class TaskApp(QMainWindow):
 
         # 添加按钮
         add_btn = QPushButton("添加")
+        clean_button_focus(add_btn)
         add_btn.setObjectName("addBtn")
         add_btn.setCursor(Qt.PointingHandCursor)
         add_btn.setFixedHeight(42)
@@ -1183,11 +1476,26 @@ class TaskApp(QMainWindow):
         """显示日历弹窗"""
         dlg = QDialog(self)
         dlg.setWindowTitle("日历")
-        dlg.setFixedSize(420, 450)
+        dlg.setFixedSize(456, 486)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         dlg.setStyleSheet("""
             QDialog {
-                background: rgba(255,255,255,0.98);
+                background: transparent;
+            }
+        """)
+
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(0)
+
+        container = QFrame()
+        container.setObjectName("calendarDialogContainer")
+        container.setStyleSheet("""
+            #calendarDialogContainer {
+                background: #ffffff;
                 border-radius: 10px;
+                border: 1px solid rgba(0, 0, 0, 0.1);
             }
         """)
 
@@ -1195,15 +1503,47 @@ class TaskApp(QMainWindow):
         shadow.setBlurRadius(30)
         shadow.setColor(QColor(0, 0, 0, 60))
         shadow.setOffset(0, 8)
-        dlg.setGraphicsEffect(shadow)
+        container.setGraphicsEffect(shadow)
 
-        layout = QVBoxLayout(dlg)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
 
+        title_row = QWidget()
+        title_row_layout = QHBoxLayout(title_row)
+        title_row_layout.setContentsMargins(0, 0, 0, 0)
+        title_row_layout.setSpacing(8)
+
         title = QLabel("📅 日历")
         title.setStyleSheet("font-size: 18px; font-weight: 600; color: #1d1d1f;")
-        layout.addWidget(title)
+        title_row_layout.addWidget(title)
+        title_row_layout.addStretch()
+
+        close_btn = WindowControlButton("close")
+        close_btn.setObjectName("closeBtn")
+        close_btn.clicked.connect(dlg.accept)
+        title_row_layout.addWidget(close_btn)
+        layout.addWidget(title_row)
+
+        drag_pos = {"value": None}
+
+        def calendar_mouse_press(event):
+            if event.button() == Qt.LeftButton:
+                drag_pos["value"] = event.globalPosition().toPoint() - dlg.pos()
+
+        def calendar_mouse_move(event):
+            if drag_pos["value"] and event.buttons() & Qt.LeftButton:
+                dlg.move(event.globalPosition().toPoint() - drag_pos["value"])
+
+        def calendar_mouse_release(event):
+            drag_pos["value"] = None
+
+        title_row.mousePressEvent = calendar_mouse_press
+        title_row.mouseMoveEvent = calendar_mouse_move
+        title_row.mouseReleaseEvent = calendar_mouse_release
+        title.mousePressEvent = calendar_mouse_press
+        title.mouseMoveEvent = calendar_mouse_move
+        title.mouseReleaseEvent = calendar_mouse_release
 
         # 使用自定义日历控件
         calendar = HolidayCalendar()
@@ -1238,25 +1578,16 @@ class TaskApp(QMainWindow):
 
         # 节假日信息显示
         today = QDate.currentDate()
-        today_str = today.toString("yyyy-MM-dd")
-        if today_str in HOLIDAYS:
-            holiday_info = QLabel(HOLIDAYS[today_str])
-            holiday_info.setStyleSheet("color: #00C7BE; font-size: 14px; font-weight: 600; padding: 8px;")
-        else:
-            holiday_info = QLabel("点击日期查看节假日信息")
-            holiday_info.setStyleSheet("color: #8e8e93; font-size: 13px; padding: 8px;")
+        info_text, label_kinds = format_calendar_info(today)
+        holiday_info = QLabel(info_text)
+        holiday_info.setStyleSheet(calendar_info_style(label_kinds))
         holiday_info.setAlignment(Qt.AlignCenter)
         layout.addWidget(holiday_info)
 
         def on_date_selected(qdate):
-            date_str = qdate.toString("yyyy-MM-dd")
-            if date_str in HOLIDAYS:
-                holiday_info.setText(HOLIDAYS[date_str])
-                holiday_info.setStyleSheet("color: #00C7BE; font-size: 14px; font-weight: 600; padding: 8px;")
-            else:
-                weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-                holiday_info.setText(weekday[qdate.dayOfWeek() - 1])
-                holiday_info.setStyleSheet("color: #8e8e93; font-size: 13px; padding: 8px;")
+            info_text, label_kinds = format_calendar_info(qdate)
+            holiday_info.setText(info_text)
+            holiday_info.setStyleSheet(calendar_info_style(label_kinds))
 
         calendar.clicked.connect(on_date_selected)
 
@@ -1265,6 +1596,7 @@ class TaskApp(QMainWindow):
 
         # 回到今天按钮
         back_today_btn = QPushButton("📅 回到今天")
+        clean_button_focus(back_today_btn)
         back_today_btn.setStyleSheet("""
             QPushButton {
                 background: rgba(0, 122, 255, 0.1);
@@ -1290,29 +1622,10 @@ class TaskApp(QMainWindow):
 
         back_today_btn.clicked.connect(go_today)
         btn_layout.addWidget(back_today_btn)
-
         btn_layout.addStretch()
 
-        close_btn = QPushButton("关闭")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: #007AFF;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 10px 24px;
-                font-size: 14px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #0056CC;
-            }
-        """)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.clicked.connect(dlg.accept)
-        btn_layout.addWidget(close_btn)
-
         layout.addLayout(btn_layout)
+        outer.addWidget(container)
 
         dlg.exec()
 
@@ -1357,7 +1670,6 @@ class TaskApp(QMainWindow):
                     background: rgba(142, 142, 147, 0.18);
                 }
             """)
-            self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                    完成时间", "创建时间"])
             self.refresh_history_list()
 
     def go_to_main(self):
@@ -1397,7 +1709,6 @@ class TaskApp(QMainWindow):
         """)
         self.task_input.clear()
         self.task_input.setPlaceholderText("输入内容")
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
         self.refresh_task_list()
 
     def header_mouse_press(self, event):
@@ -1495,19 +1806,74 @@ class TaskApp(QMainWindow):
         """弹出截止日期选择"""
         dlg = QDialog(self)
         dlg.setWindowTitle("选择截止日期")
-        dlg.setFixedSize(280, 150)
+        dlg.setFixedSize(316, 210)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         dlg.setStyleSheet("""
             QDialog {
-                background: rgba(255,255,255,0.98);
-                border-radius: 10px;
+                background: transparent;
             }
         """)
-        layout = QVBoxLayout(dlg)
+
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(0)
+
+        container = QFrame()
+        container.setObjectName("deadlineDialogContainer")
+        container.setStyleSheet("""
+            #deadlineDialogContainer {
+                background: #ffffff;
+                border-radius: 10px;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+            }
+        """)
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 8)
+        container.setGraphicsEffect(shadow)
+
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        title_row = QWidget()
+        title_row_layout = QHBoxLayout(title_row)
+        title_row_layout.setContentsMargins(0, 0, 0, 0)
+        title_row_layout.setSpacing(8)
 
         label = QLabel("📅 选择截止日期")
         label.setStyleSheet("font-size: 14px; font-weight: 600; color: #1d1d1f;")
-        layout.addWidget(label)
+        title_row_layout.addWidget(label)
+        title_row_layout.addStretch()
+
+        close_btn = WindowControlButton("close")
+        close_btn.setObjectName("closeBtn")
+        close_btn.clicked.connect(dlg.reject)
+        title_row_layout.addWidget(close_btn)
+        layout.addWidget(title_row)
+
+        drag_pos = {"value": None}
+
+        def deadline_mouse_press(event):
+            if event.button() == Qt.LeftButton:
+                drag_pos["value"] = event.globalPosition().toPoint() - dlg.pos()
+
+        def deadline_mouse_move(event):
+            if drag_pos["value"] and event.buttons() & Qt.LeftButton:
+                dlg.move(event.globalPosition().toPoint() - drag_pos["value"])
+
+        def deadline_mouse_release(event):
+            drag_pos["value"] = None
+
+        title_row.mousePressEvent = deadline_mouse_press
+        title_row.mouseMoveEvent = deadline_mouse_move
+        title_row.mouseReleaseEvent = deadline_mouse_release
+        label.mousePressEvent = deadline_mouse_press
+        label.mouseMoveEvent = deadline_mouse_move
+        label.mouseReleaseEvent = deadline_mouse_release
 
         date_edit = QDateEdit()
         date_edit.setCalendarPopup(True)
@@ -1523,6 +1889,7 @@ class TaskApp(QMainWindow):
 
         btn_layout = QHBoxLayout()
         cancel_btn = QPushButton("取消")
+        clean_button_focus(cancel_btn)
         cancel_btn.setStyleSheet("""
             QPushButton {
                 background: rgba(0,0,0,0.05); border: none;
@@ -1534,6 +1901,7 @@ class TaskApp(QMainWindow):
         btn_layout.addWidget(cancel_btn)
 
         ok_btn = QPushButton("确定")
+        clean_button_focus(ok_btn)
         ok_btn.setStyleSheet("""
             QPushButton {
                 background: #007AFF; color: white; border: none;
@@ -1545,6 +1913,7 @@ class TaskApp(QMainWindow):
         btn_layout.addWidget(ok_btn)
 
         layout.addLayout(btn_layout)
+        outer.addWidget(container)
 
         if dlg.exec() == QDialog.Accepted:
             return date_edit.date().toString("yyyy-MM-dd")
@@ -1595,10 +1964,11 @@ class TaskApp(QMainWindow):
             else:
                 self.refresh_task_list()
 
-        # 清除选中态，焦点回到输入框
+        # 清除选中态，焦点回到主窗口，避免输入框突然亮起
         self.task_list.clearSelection()
         self.task_list.setCurrentItem(None)
-        self.task_input.setFocus()
+        self.task_list.clearFocus()
+        self.setFocus(Qt.OtherFocusReason)
 
     def _find_task(self, task_id):
         """查找任务（包括待办和历史）"""
@@ -1652,6 +2022,7 @@ class TaskApp(QMainWindow):
 
             # 完成方块
             check_btn = QPushButton()
+            clean_button_focus(check_btn)
             check_btn.setFixedSize(26, 26)
             check_btn.setCursor(Qt.PointingHandCursor)
             hover_color = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["color"]
@@ -1774,6 +2145,7 @@ class TaskApp(QMainWindow):
             if task_type == "pending":
                 # 待办：空方框
                 check_btn = QPushButton()
+                clean_button_focus(check_btn)
                 check_btn.setFixedSize(26, 26)
                 check_btn.setCursor(Qt.PointingHandCursor)
                 check_btn.setStyleSheet(f"""
@@ -1798,6 +2170,7 @@ class TaskApp(QMainWindow):
             else:
                 # 已完成：绿色对钩
                 uncheck_btn = QPushButton("✓")
+                clean_button_focus(uncheck_btn)
                 uncheck_btn.setFixedSize(26, 26)
                 uncheck_btn.setCursor(Qt.PointingHandCursor)
                 uncheck_btn.setStyleSheet(f"""
@@ -1887,7 +2260,7 @@ class TaskApp(QMainWindow):
 
     def refresh_history_list(self):
         """刷新历史列表"""
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                    完成时间", "创建时间"])
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                          完成时间", "创建时间"])
         self.task_list.clear()
 
         source = self.manager.tasks["completed"]
@@ -1906,6 +2279,7 @@ class TaskApp(QMainWindow):
             hover_bg = PRIORITY_CONFIG.get(priority, PRIORITY_CONFIG["中"])["bg"]
 
             uncheck_btn = QPushButton("✓")
+            clean_button_focus(uncheck_btn)
             uncheck_btn.setFixedSize(26, 26)
             uncheck_btn.setCursor(Qt.PointingHandCursor)
             uncheck_btn.setStyleSheet(f"""
