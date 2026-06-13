@@ -6,17 +6,17 @@
 import sys
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from ctypes import windll, c_int, c_short, byref, sizeof, Structure, c_uint, POINTER, wintypes
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QFrame, QGraphicsDropShadowEffect, QMessageBox, QDialog,
-    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget
+    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu
 )
-from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect
-from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen
+from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect, Signal
+from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen, QAction
 
 
 def clean_button_focus(button):
@@ -485,7 +485,8 @@ class TaskManager:
             "type": task_type,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "deadline": deadline,
-            "completed_at": None
+            "completed_at": None,
+            "pinned": False
         }
         self.tasks["pending"].append(task)
         self.save_data()
@@ -534,6 +535,15 @@ class TaskManager:
                 task["completed_at"] = None
                 self.tasks["pending"].append(task)
                 self.tasks["completed"].pop(i)
+                self.save_data()
+                return True
+        return False
+
+    def toggle_pin_task(self, task_id):
+        """切换任务置顶状态"""
+        for task in self.tasks["completed"]:
+            if task["id"] == task_id:
+                task["pinned"] = not task.get("pinned", False)
                 self.save_data()
                 return True
         return False
@@ -957,12 +967,150 @@ class WindowControlButton(QPushButton):
             painter.drawLine(center_x + 5, center_y - 5, center_x - 5, center_y + 5)
 
 
+class TaskHeaderView(QHeaderView):
+    """任务列表表头，负责绘制和切换6天外计划任务的小眼睛。"""
+
+    toggleVisibilityClicked = Signal()
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.toggle_visible = False
+        self.show_all_plan_tasks = False
+        self.toggle_pressed = False
+        self.toggle_hovered = False
+        self.setSectionsClickable(True)
+        self.setMouseTracking(True)
+
+    def set_toggle_visible(self, visible):
+        self.toggle_visible = visible
+        if not visible:
+            self.toggle_pressed = False
+            self.toggle_hovered = False
+            self.unsetCursor()
+        self.viewport().update()
+
+    def set_show_all_plan_tasks(self, show_all):
+        self.show_all_plan_tasks = show_all
+        self.setToolTip("显示全部计划任务" if show_all else "隐藏6天外计划任务")
+        self.viewport().update()
+
+    def _toggle_rect(self, section_rect):
+        width = 26
+        height = 26
+        x = section_rect.x() + (section_rect.width() - width) // 2 + 1
+        y = section_rect.y() + (section_rect.height() - height) // 2
+        return QRect(x, y, width, height)
+
+    def _is_toggle_point(self, point):
+        if not self.toggle_visible or self.logicalIndexAt(point) != 0:
+            return False
+        section_rect = QRect(
+            self.sectionViewportPosition(0),
+            0,
+            self.sectionSize(0),
+            self.height()
+        )
+        return self._toggle_rect(section_rect).contains(point)
+
+    def _is_toggle_event(self, event):
+        return self._is_toggle_point(event.position().toPoint())
+
+    def paintSection(self, painter, rect, logicalIndex):
+        super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex != 0 or not self.toggle_visible:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        button_rect = self._toggle_rect(rect)
+        border_color = QColor(0, 122, 255, 95) if self.show_all_plan_tasks else QColor("#c7c7cc")
+        bg_color = QColor(0, 122, 255, 28) if self.show_all_plan_tasks else QColor(255, 255, 255, 150)
+        icon_color = QColor("#007AFF") if self.show_all_plan_tasks else QColor("#8e8e93")
+        if self.toggle_hovered:
+            border_color = QColor(0, 122, 255, 110)
+            bg_color = QColor(0, 122, 255, 36)
+            icon_color = QColor("#007AFF")
+        if self.toggle_pressed:
+            border_color = QColor(0, 122, 255, 135)
+            bg_color = QColor(0, 122, 255, 55)
+
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(button_rect, 5, 5)
+
+        center_x = button_rect.center().x() + 1
+        center_y = button_rect.center().y() + 1
+        eye_rect = QRect(center_x - 8, center_y - 5, 16, 10)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(icon_color, 1.5))
+        painter.drawEllipse(eye_rect)
+        painter.setBrush(icon_color)
+        painter.drawEllipse(QRect(center_x - 2, center_y - 2, 4, 4))
+
+        if not self.show_all_plan_tasks:
+            slash_pen = QPen(icon_color, 1.7)
+            slash_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(slash_pen)
+            painter.drawLine(center_x - 8, center_y + 7, center_x + 8, center_y - 7)
+
+        painter.restore()
+
+    def mouseMoveEvent(self, event):
+        is_hovered = self._is_toggle_event(event)
+        if self.toggle_hovered != is_hovered:
+            self.toggle_hovered = is_hovered
+            self.setCursor(Qt.PointingHandCursor if is_hovered else Qt.ArrowCursor)
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.toggle_hovered or self.toggle_pressed:
+            self.toggle_hovered = False
+            self.toggle_pressed = False
+            self.unsetCursor()
+            self.viewport().update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._is_toggle_event(event):
+            self.toggle_pressed = True
+            self.viewport().update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.toggle_pressed:
+            self.toggle_pressed = False
+            if self._is_toggle_event(event):
+                self.toggleVisibilityClicked.emit()
+            self.viewport().update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._is_toggle_event(event):
+            self.toggle_pressed = False
+            self.toggleVisibilityClicked.emit()
+            self.viewport().update()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class TaskApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.manager = TaskManager()
         self.searching = False
         self.showing_history = False
+        self.show_far_future_tasks = False
+        self.task_refresh_timer = QTimer(self)
+        self.task_refresh_timer.setSingleShot(True)
+        self.task_refresh_timer.timeout.connect(self.refresh_task_list_after_toggle)
 
         self.setWindowTitle("Dailyinfo")
         self.resize(1100, 720)
@@ -1131,16 +1279,16 @@ class TaskApp(QMainWindow):
         main_layout.addWidget(header)
 
         # ====== 工具栏 ======
-        toolbar = QFrame()
-        toolbar.setObjectName("toolBar")
-        toolbar.setStyleSheet("""
+        self.toolbar = QFrame()
+        self.toolbar.setObjectName("toolBar")
+        self.toolbar.setStyleSheet("""
             #toolBar {
                 background: rgba(255, 255, 255, 0.6);
                 border-radius: 10px;
                 border: 1px solid rgba(0, 0, 0, 0.08);
             }
         """)
-        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout = QHBoxLayout(self.toolbar)
         toolbar_layout.setContentsMargins(12, 10, 12, 10)
         toolbar_layout.setSpacing(8)
 
@@ -1156,14 +1304,25 @@ class TaskApp(QMainWindow):
                 padding: 0 14px;
                 font-size: 14px;
                 color: #1d1d1f;
+                placeholder-text-color: #9a9aa0;
             }
             QLineEdit:focus {
-                border: 1.5px solid #007AFF;
-                background: rgba(255, 255, 255, 0.7);
+                border: 1px solid rgba(0, 0, 0, 0.10);
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba(225, 225, 230, 0.75),
+                    stop: 0.18 rgba(255, 255, 255, 0.78),
+                    stop: 0.82 rgba(255, 255, 255, 0.78),
+                    stop: 1 rgba(232, 232, 236, 0.55)
+                );
+                placeholder-text-color: #6e6e73;
             }
         """)
         self.task_input.returnPressed.connect(self.add_task)
         self.task_input.textChanged.connect(self.on_input_changed)
+        # 中文右键菜单
+        self.task_input.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.task_input.customContextMenuRequested.connect(self._show_input_context_menu)
         toolbar_layout.addWidget(self.task_input, 1)
 
         # 搜索按钮
@@ -1222,7 +1381,7 @@ class TaskApp(QMainWindow):
         toolbar_wrap_layout = QHBoxLayout(toolbar_wrap)
         toolbar_wrap_layout.setContentsMargins(18, 0, 18, 0)
         toolbar_wrap_layout.setSpacing(0)
-        toolbar_wrap_layout.addWidget(toolbar)
+        toolbar_wrap_layout.addWidget(self.toolbar)
         main_layout.addWidget(toolbar_wrap)
 
         # ====== 任务列表 ======
@@ -1233,7 +1392,10 @@ class TaskApp(QMainWindow):
         list_layout.setSpacing(0)
 
         self.task_list = QTreeWidget()
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
+        self.task_header = TaskHeaderView(Qt.Horizontal, self.task_list)
+        self.task_header.toggleVisibilityClicked.connect(self.toggle_far_future_tasks)
+        self.task_list.setHeader(self.task_header)
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                  计划截止日期", "创建时间"])
         self.task_list.setRootIsDecorated(False)
         self.task_list.header().setDefaultAlignment(Qt.AlignLeft)
         self.task_list.setColumnWidth(0, 64)
@@ -1711,6 +1873,110 @@ class TaskApp(QMainWindow):
         self.task_input.setPlaceholderText("输入内容")
         self.refresh_task_list()
 
+    def toggle_far_future_tasks(self):
+        """切换主页面是否显示6天外计划任务。"""
+        self.show_far_future_tasks = not self.show_far_future_tasks
+        self.task_header.set_show_all_plan_tasks(self.show_far_future_tasks)
+        self.task_header.viewport().repaint()
+        QApplication.processEvents()
+        self.task_refresh_timer.start(60)
+
+    def refresh_task_list_after_toggle(self):
+        """小眼睛切换后的延迟刷新，只作用于主页面。"""
+        if not self.searching and not self.showing_history:
+            self.refresh_task_list()
+
+    def clear_task_input_caret(self):
+        """清理输入框焦点光标，避免打开详情页后留下蓝色残影。"""
+        self.task_input.deselect()
+        self.task_input.setCursorPosition(0)
+        self.task_input.clearFocus()
+        self.setFocus(Qt.OtherFocusReason)
+        self.task_input.setEnabled(False)
+        self.task_input.update()
+        self.task_input.repaint()
+        self.toolbar.update()
+        self.toolbar.repaint()
+        QApplication.processEvents()
+        self.task_input.setEnabled(True)
+        self.task_input.clearFocus()
+
+    def _show_input_context_menu(self, pos):
+        """输入框中文右键菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 8px 24px;
+                font-size: 13px;
+            }
+            QMenu::item:selected {
+                background: #f0f0f0;
+                border-radius: 4px;
+            }
+            QMenu::item:disabled {
+                color: #c0c0c0;
+            }
+        """)
+
+        line_edit = self.task_input
+        has_selection = line_edit.hasSelectedText()
+        has_text = len(line_edit.text()) > 0
+        has_clipboard = QApplication.clipboard().text() != ""
+
+        # 撤销
+        undo_action = QAction("撤销", self)
+        undo_action.setEnabled(line_edit.isUndoAvailable())
+        undo_action.triggered.connect(line_edit.undo)
+        menu.addAction(undo_action)
+
+        # 重做
+        redo_action = QAction("重做", self)
+        redo_action.setEnabled(line_edit.isRedoAvailable())
+        redo_action.triggered.connect(line_edit.redo)
+        menu.addAction(redo_action)
+
+        menu.addSeparator()
+
+        # 剪切
+        cut_action = QAction("剪切", self)
+        cut_action.setEnabled(has_selection)
+        cut_action.triggered.connect(line_edit.cut)
+        menu.addAction(cut_action)
+
+        # 复制
+        copy_action = QAction("复制", self)
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(line_edit.copy)
+        menu.addAction(copy_action)
+
+        # 粘贴
+        paste_action = QAction("粘贴", self)
+        paste_action.setEnabled(has_clipboard)
+        paste_action.triggered.connect(line_edit.paste)
+        menu.addAction(paste_action)
+
+        # 删除
+        delete_action = QAction("删除", self)
+        delete_action.setEnabled(has_selection)
+        delete_action.triggered.connect(line_edit.del_)
+        menu.addAction(delete_action)
+
+        menu.addSeparator()
+
+        # 全选
+        select_all_action = QAction("全选", self)
+        select_all_action.setEnabled(has_text)
+        select_all_action.triggered.connect(line_edit.selectAll)
+        menu.addAction(select_all_action)
+
+        menu.exec(line_edit.mapToGlobal(pos))
+
     def header_mouse_press(self, event):
         if event.button() == Qt.LeftButton and not self.isMaximized():
             self._drag_pos = event.globalPosition().toPoint() - self.pos()
@@ -1921,6 +2187,8 @@ class TaskApp(QMainWindow):
 
     def on_task_click(self, item, column):
         """点击任务条打开详情"""
+        self.clear_task_input_caret()
+
         task_id = item.data(0, Qt.UserRole)
         task = self._find_task(task_id)
         if not task:
@@ -1968,7 +2236,7 @@ class TaskApp(QMainWindow):
         self.task_list.clearSelection()
         self.task_list.setCurrentItem(None)
         self.task_list.clearFocus()
-        self.setFocus(Qt.OtherFocusReason)
+        self.clear_task_input_caret()
 
     def _find_task(self, task_id):
         """查找任务（包括待办和历史）"""
@@ -1982,34 +2250,70 @@ class TaskApp(QMainWindow):
 
     def refresh_task_list(self):
         """刷新任务列表（默认显示所有未完成任务）"""
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                计划截止日期", "创建时间"])
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                  计划截止日期", "创建时间"])
+        self.task_header.set_toggle_visible(True)
+        self.task_header.set_show_all_plan_tasks(self.show_far_future_tasks)
         self.task_list.clear()
 
-        today = date.today().strftime("%Y-%m-%d")
-        source = self.manager.tasks["pending"]
+        today_date = date.today()
+        today = today_date.strftime("%Y-%m-%d")
+        hide_after_date = today_date + timedelta(days=5)
+        all_pending = self.manager.tasks["pending"]
+        priority_order = {"高": 0, "中": 1, "低": 2}
+
+        def parse_deadline(task):
+            deadline = task.get("deadline", "")
+            if not deadline:
+                return None
+            try:
+                return date.fromisoformat(deadline)
+            except ValueError:
+                return None
+
+        def is_far_future_plan(task):
+            if task.get("type") != "计划任务":
+                return False
+            deadline_date = parse_deadline(task)
+            return deadline_date is not None and deadline_date > hide_after_date
+
+        def parse_created_date(task):
+            try:
+                return date.fromisoformat(task.get("created_at", "")[:10])
+            except ValueError:
+                return today_date
+
+        hidden_count = sum(1 for task in all_pending if is_far_future_plan(task))
+        if self.show_far_future_tasks:
+            source = list(all_pending)
+        else:
+            source = [task for task in all_pending if not is_far_future_plan(task)]
 
         def sort_key(task):
-            # 计划任务日期当前（今天或未来）= 0
-            # 已过期内容（昨天或更早）= 1
-            # 计划（无日期）= 2
-            # 高 = 3
-            # 中 = 4
-            # 低 = 5
-            if task["type"] == "计划任务":
-                deadline = task.get("deadline", "")
-                if deadline:
-                    if deadline >= today:
-                        return (0, deadline)
-                    else:
-                        return (1, deadline)
-                else:
-                    return (2, "")
+            # 关闭小眼睛：过期计划、过期普通、今天、未来5天；打开后6天外计划任务置顶。
+            priority_rank = priority_order.get(task.get("priority"), 1)
+            if task.get("type") == "计划任务":
+                deadline_date = parse_deadline(task)
+                if deadline_date:
+                    if self.show_far_future_tasks and deadline_date > hide_after_date:
+                        return (0, deadline_date.toordinal(), priority_rank)
+                    if deadline_date < today_date:
+                        return (1, deadline_date.toordinal(), priority_rank)
+                    if deadline_date == today_date:
+                        return (3, 0, priority_rank)
+                    return (4, deadline_date.toordinal(), priority_rank)
+                return (5, 0, priority_rank)
             else:
-                order = {"高": 3, "中": 4, "低": 5}
-                return (order.get(task["priority"], 4), "")
+                created_date = parse_created_date(task)
+                if created_date < today_date:
+                    return (2, priority_rank, created_date.toordinal())
+                return (3, priority_rank, created_date.toordinal())
 
         source = sorted(source, key=sort_key)
 
+        if len(source) == 0 and hidden_count > 0 and not self.show_far_future_tasks:
+            self.empty_label.setText("6天外计划任务已隐藏")
+        else:
+            self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(source) == 0)
         self.task_list.setVisible(len(source) > 0)
 
@@ -2120,7 +2424,8 @@ class TaskApp(QMainWindow):
 
     def refresh_search_list(self, results):
         """刷新搜索结果列表"""
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                                时间信息", "创建时间"])
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                  时间信息", "创建时间"])
+        self.task_header.set_toggle_visible(False)
         self.task_list.clear()
 
         all_tasks = []
@@ -2130,6 +2435,7 @@ class TaskApp(QMainWindow):
         priority_order = {"计划": -1, "高": 0, "中": 1, "低": 2}
         all_tasks.sort(key=lambda x: priority_order.get(x[1]["priority"], 1))
 
+        self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(all_tasks) == 0)
         self.task_list.setVisible(len(all_tasks) > 0)
 
@@ -2260,15 +2566,28 @@ class TaskApp(QMainWindow):
 
     def refresh_history_list(self):
         """刷新历史列表"""
-        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                                          完成时间", "创建时间"])
+        self.task_list.setHeaderLabels(["", "        任务内容                                                                                                                                                          完成时间", "创建时间"])
+        self.task_header.set_toggle_visible(False)
         self.task_list.clear()
+
+        # 启用右键菜单（先断开避免重复连接）
+        try:
+            self.task_list.customContextMenuRequested.disconnect(self.show_history_context_menu)
+        except (TypeError, RuntimeError):
+            pass
+        self.task_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.task_list.customContextMenuRequested.connect(self.show_history_context_menu)
 
         source = self.manager.tasks["completed"]
 
+        self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(source) == 0)
         self.task_list.setVisible(len(source) > 0)
 
-        for task in source:
+        # 按置顶状态排序：pinned=True 的排在前面
+        sorted_source = sorted(source, key=lambda t: not t.get("pinned", False))
+
+        for task in sorted_source:
             item = QTreeWidgetItem()
             item.setData(0, Qt.UserRole, task["id"])
             self.task_list.addTopLevelItem(item)
@@ -2322,7 +2641,9 @@ class TaskApp(QMainWindow):
             content_layout.addWidget(dot)
 
             title = task["title"]
-            if task["type"] == "计划任务":
+            if task.get("pinned", False):
+                title = f"📌 {title}"
+            elif task["type"] == "计划任务":
                 title = f"📅 {title}"
             else:
                 title = f"📝 {title}"
@@ -2374,6 +2695,53 @@ class TaskApp(QMainWindow):
             self.refresh_history_list()
         else:
             self.refresh_task_list()
+
+    def show_history_context_menu(self, pos):
+        """历史页面右键菜单"""
+        item = self.task_list.itemAt(pos)
+        if not item:
+            return
+        task_id = item.data(0, Qt.UserRole)
+        if not task_id:
+            return
+        # 查找任务
+        task = None
+        for t in self.manager.tasks["completed"]:
+            if t["id"] == task_id:
+                task = t
+                break
+        if not task:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 8px 24px;
+                font-size: 13px;
+            }
+            QMenu::item:selected {
+                background: #f0f0f0;
+                border-radius: 4px;
+            }
+        """)
+
+        is_pinned = task.get("pinned", False)
+        pin_action = QAction("取消置顶" if is_pinned else "置顶", self)
+        pin_action.triggered.connect(lambda: self._toggle_pin(task_id))
+        menu.addAction(pin_action)
+
+        menu.exec(self.task_list.viewport().mapToGlobal(pos))
+
+    def _toggle_pin(self, task_id):
+        """切换置顶状态"""
+        self.manager.toggle_pin_task(task_id)
+        self.refresh_history_list()
 
     def update_stats(self):
         stats = self.manager.get_stats()
@@ -2498,7 +2866,7 @@ QHeaderView::section {
     border: none;
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
     padding: 8px 12px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     color: #8e8e93;
 }
