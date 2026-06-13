@@ -1,4 +1,4 @@
-# Dailyinfo
+# Dailyinfo V3.0
 
 > 每日任务管理工具 | PySide6 毛玻璃风格
 
@@ -12,6 +12,8 @@ Dailyinfo 是一款轻量级的 Windows 桌面任务管理工具，采用 PySide
 - 支持截止日期设置，过期任务自动高亮
 - 任务详情弹窗，支持编辑标题、内容、状态和类型
 - 全局搜索，快速定位待办和历史任务
+- 历史任务支持右键置顶，重要完成记录可固定在前面
+- 计划任务支持远期任务显隐切换，减少主页面干扰
 
 ### 日历功能
 - 内置日历控件，支持农历显示
@@ -25,6 +27,7 @@ Dailyinfo 是一款轻量级的 Windows 桌面任务管理工具，采用 PySide
 - 存储方式一键切换，数据自动合并
 - MySQL 密码加密存储，绑定当前机器
 - 异步数据库操作，界面响应流畅
+- MySQL 连接失败时自动回退本地 JSON，避免启动流程被网络问题阻塞
 
 ### 界面设计
 - Windows 无边框窗口
@@ -32,6 +35,7 @@ Dailyinfo 是一款轻量级的 Windows 桌面任务管理工具，采用 PySide
 - 圆角容器和阴影
 - 自绘窗口控制按钮
 - 响应式布局，支持窗口最大化
+- 输入框和设置页支持中文右键菜单
 
 ## 快速开始
 
@@ -46,6 +50,8 @@ Dailyinfo 是一款轻量级的 Windows 桌面任务管理工具，采用 PySide
 pip install PySide6 cryptography pymysql pyinstaller
 ```
 
+如果只使用本地 JSON 模式，`pymysql` 和 `cryptography` 可暂时不安装；切换 MySQL 模式时建议补齐这两个依赖。
+
 ### 运行程序
 
 ```bash
@@ -58,7 +64,7 @@ python Code/daily_tasks.py
 python -m PyInstaller 每日任务管理.spec --clean
 ```
 
-打包完成后，可执行文件位于 `dist/Dailyinfo.exe`。
+打包完成后，可执行文件位于 `dist/Dailyinfo.exe`。打包配置文件为本地打包资源，默认不提交到仓库。
 
 ## 配置说明
 
@@ -68,6 +74,8 @@ python -m PyInstaller 每日任务管理.spec --clean
 
 - **JSON 模式**：数据保存在 `Data/tasks.json`，适合单机使用
 - **MySQL 模式**：数据保存在远程 MySQL 数据库，适合多设备同步
+- **配置文件**：存储方式和数据库配置保存在 `Data/settings.json`
+- **切换生效**：保存设置后需要重启应用，新存储方式才会生效
 
 ### MySQL 配置
 
@@ -86,6 +94,8 @@ python -m PyInstaller 每日任务管理.spec --clean
 - MySQL 密码使用 Fernet 对称加密算法加密
 - 加密密钥基于当前机器信息生成，配置文件仅在本机可用
 - 数据库连接支持超时设置，避免网络问题导致程序卡顿
+- 测试连接会自动创建目标数据库，任务表由应用启动或首次连接时自动创建
+- 切换存储方式时会合并两端数据，按任务 ID 去重并保留较新的记录
 
 ## 项目结构
 
@@ -93,17 +103,27 @@ python -m PyInstaller 每日任务管理.spec --clean
 每日任务/
 ├── Code/
 │   └── daily_tasks.py          # 主程序代码
-├── Data/
-│   ├── tasks.json              # JSON 模式数据文件
-│   └── settings.json           # 配置文件（密码已加密）
 ├── docs/
 │   └── ui_terms.md             # UI 区块命名规范
 ├── Ico/
 │   └── 岚兮儿天下无敌好看.ico  # 应用图标
-├── 每日任务管理.spec            # PyInstaller 打包配置
 ├── README.md                   # 项目说明文档
 ├── AGENTS.md                   # AI 代理协作说明
-└── CLAUDE.md                   # Claude Code 协作说明
+├── start.bat                   # 本地启动脚本
+└── go.vbs                      # 本地静默启动脚本
+```
+
+运行或打包过程中会生成以下本地文件和目录，默认不提交到 GitHub：
+
+```text
+Data/
+├── tasks.json                  # JSON 模式任务数据
+└── settings.json               # 存储配置和加密后的数据库密码
+
+build/                          # PyInstaller 构建缓存
+dist/                           # PyInstaller 输出目录
+每日任务管理.spec                # 本地打包配置
+CLAUDE.md                       # 本地协作配置
 ```
 
 ## 技术架构
@@ -117,6 +137,8 @@ python -m PyInstaller 每日任务管理.spec --clean
 | `TaskDetailDialog` | 任务详情弹窗，支持编辑和状态变更 |
 | `HolidayCalendar` | 自定义日历控件，负责日期绘制和节日显示 |
 | `SettingsDialog` | 设置弹窗，配置存储方式和数据库连接 |
+| `TaskHeaderView` | 自定义任务表头，负责远期计划显隐按钮绘制和交互 |
+| `WindowControlButton` | 自绘窗口控制按钮，负责最小化、最大化、还原和关闭图标 |
 
 ### 技术栈
 
@@ -131,6 +153,7 @@ python -m PyInstaller 每日任务管理.spec --clean
 - 延迟数据库连接：启动时使用 JSON 模式，首次操作 MySQL 时才建立连接
 - 异步操作：数据库读写在后台线程执行，不阻塞 UI
 - 增量更新：单条记录操作，避免全量同步
+- 本地回退：MySQL 不可用时保留 JSON 保存路径，降低数据丢失风险
 
 ## 开发指南
 
@@ -164,11 +187,18 @@ logging.basicConfig(level=logging.DEBUG)
 - 新增设置弹窗，可配置数据库连接
 - 存储方式切换时自动合并数据，避免数据丢失
 - MySQL 密码加密存储，绑定当前机器
+- 新增连接测试，支持自动创建目标数据库
+- 新增历史任务右键置顶和远期计划任务显隐控制
 
 **性能优化**
 - 延迟数据库连接，启动速度提升
 - 异步数据库操作，界面响应更流畅
 - 增量更新单条记录，操作效率提升
+- MySQL 异常时回退本地 JSON 保存，减少网络问题对日常使用的影响
+
+**文档同步**
+- README、UI 命名规范和 AI 协作文档统一跟进到 V3.0
+- 明确本地生成文件和 GitHub 跟踪文件的边界
 
 ### V2.5.1 (2026-06-12)
 

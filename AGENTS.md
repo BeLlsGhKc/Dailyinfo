@@ -2,6 +2,8 @@
 
 本文档用于指导 Codex 在本仓库内工作。
 
+当前项目版本：V3.0。
+
 ## 基本约束
 
 - 始终使用中文回复、中文文档和中文提交信息。
@@ -10,12 +12,12 @@
 - 不要执行可能损坏数据的操作，除非用户明确确认。
 - 不要回退用户已有改动；遇到无关改动时保持原样。
 - 文件路径在沟通中优先使用绝对路径。
-- 所有 SQL 相关语句、解释和语法统一使用小写。
+- 所有 sql 相关语句、解释和语法统一使用小写。
 - 不使用上标字符，平方写成 `x^2`，Python 代码写成 `x**2`。
 
 ## 项目概述
 
-Dailyinfo 是 Windows 桌面每日任务管理工具，使用 PySide6 开发，界面采用无边框窗口、圆角容器、毛玻璃效果和自绘窗口控制按钮。
+Dailyinfo 是 Windows 桌面每日任务管理工具，使用 PySide6 开发，界面采用无边框窗口、圆角容器、毛玻璃效果和自绘窗口控制按钮。V3.0 支持本地 JSON 和远程 MySQL 双存储模式，可通过设置弹窗切换。
 
 主程序是单文件应用：
 
@@ -30,33 +32,49 @@ python Code/daily_tasks.py
 ```
 
 ```bash
-pip install PySide6 pyinstaller
+pip install PySide6 cryptography pymysql pyinstaller
 ```
 
 ```bash
 python -m PyInstaller 每日任务管理.spec --clean
 ```
 
+只运行本地 JSON 模式时，`pymysql` 和 `cryptography` 是可选依赖；涉及 MySQL 模式、密码加密或打包验证时需要补齐。
+
 ## 主要模块
 
-- `TaskManager`：任务数据层，负责读取、保存、添加、更新、完成、取消完成、删除和搜索任务。
+- `TaskManager`：任务数据层，负责 JSON/MySQL 读取、保存、迁移、合并、添加、更新、完成、取消完成、删除、置顶和搜索任务。
 - `TaskApp`：主窗口，负责待办页、搜索页、历史页、工具栏、日历弹窗、窗口拖动和缩放。
 - `TaskDetailDialog`：任务详情页，负责任务编辑、保存、完成、删除和类型转换。
 - `HolidayCalendar`：日历控件，负责日期绘制、节假日、节气、农历和调休上班日显示。
+- `SettingsDialog`：设置弹窗，负责存储方式选择、MySQL 连接配置、连接测试和配置保存。
+- `TaskHeaderView`：任务表头，负责远期计划任务显隐按钮绘制和交互。
 - `WindowControlButton`：自绘窗口按钮，负责最小化、最大化、还原和关闭图标绘制。
 
 ## 数据和资源
 
 - 任务数据：`Data/tasks.json`
+- 存储配置：`Data/settings.json`
 - 图标文件：`Ico/岚兮儿天下无敌好看.ico`
 - 打包配置：`每日任务管理.spec`
+- GitHub 跟踪文件不包含 `Data/`、`build/`、`dist/`、`*.spec` 和 `CLAUDE.md`，这些是本地数据或本地配置。
 - 打包资源必须包含图标：
 
 ```python
 datas=[('Ico/岚兮儿天下无敌好看.ico', 'Ico')]
 ```
 
-打包后通过 `getattr(sys, 'frozen', False)` 区分开发环境和 exe 环境；图标资源从 `sys._MEIPASS` 读取，任务数据保存在 exe 同级目录。
+打包后通过 `getattr(sys, 'frozen', False)` 区分开发环境和 exe 环境；图标资源从 `sys._MEIPASS` 读取，任务数据和配置保存在 exe 同级目录。
+
+## V3.0 存储规则
+
+- 默认使用 JSON 模式，任务数据保存在 `Data/tasks.json`。
+- 设置弹窗保存的存储方式、MySQL 主机、端口、用户名、密码和数据库名保存在 `Data/settings.json`。
+- MySQL 密码使用 `cryptography.fernet` 加密，加密密钥基于当前机器信息生成。
+- 切换存储方式后需要重启应用生效。
+- 存储方式变化时会合并 JSON 和 MySQL 两端任务，按任务 ID 去重，并保留较新的记录。
+- MySQL 不可用时应保留 JSON 回退路径，避免启动和保存被网络问题卡住。
+- sql 语句、sql 解释和 sql 语法说明统一使用小写。
 
 ## UI 维护原则
 
@@ -67,6 +85,8 @@ datas=[('Ico/岚兮儿天下无敌好看.ico', 'Ico')]
 - 按钮默认不接收键盘焦点，避免点击后出现虚线焦点框。
 - 任务详情页打开后保留正文自动聚焦，方便立即编辑。
 - 详情页关闭后不要强制聚焦输入框，避免视觉跳动。
+- 设置弹窗、输入框和数据库配置表单的右键菜单使用中文。
+- 修改设置弹窗、日历面板、截止日期弹窗、类型转换弹窗时，优先沿用无标题栏圆角弹窗样式。
 
 ## 页面和区块命名
 
