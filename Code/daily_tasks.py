@@ -6,14 +6,25 @@
 import sys
 import json
 import os
+import hashlib
+import platform
+import getpass
+import threading
 from datetime import datetime, date, timedelta
-from ctypes import windll, c_int, c_short, byref, sizeof, Structure, c_uint, POINTER, wintypes
+from ctypes import windll, c_int, c_short, byref, sizeof, Structure, c_uint, POINTER, wintypes, string_at, create_string_buffer, c_void_p
+
+# pymysql 可选依赖
+try:
+    import pymysql
+    HAS_PYMYSQL = True
+except ImportError:
+    HAS_PYMYSQL = False
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QFrame, QGraphicsDropShadowEffect, QMessageBox, QDialog,
-    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu
+    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect, Signal
 from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen, QAction
@@ -401,6 +412,101 @@ else:
 ICO_DIR = os.path.join(BASE_DIR, "Ico")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# 配置文件路径
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+MYSQL_CONNECT_TIMEOUT = 2
+MYSQL_READ_TIMEOUT = 3
+MYSQL_WRITE_TIMEOUT = 3
+
+# 默认配置
+DEFAULT_SETTINGS = {
+    "storage": "json",
+    "last_storage": "json",
+    "mysql": {
+        "host": "",
+        "port": 3306,
+        "user": "",
+        "password": "",
+        "database": "dailyinfo"
+    }
+}
+
+
+# ========== 密码加密 ==========
+try:
+    from cryptography.fernet import Fernet
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
+
+def _get_machine_key():
+    """基于机器信息生成加密密钥"""
+    # 组合机器特征信息
+    machine_info = f"{platform.node()}-{getpass.getuser()}-{platform.machine()}"
+    # 生成 32 字节的密钥（Fernet 要求）
+    key_bytes = hashlib.sha256(machine_info.encode()).digest()
+    # Fernet 需要 base64 编码的 32 字节密钥
+    import base64
+    return base64.urlsafe_b64encode(key_bytes)
+
+
+def encrypt_password(plain_text):
+    """加密密码"""
+    if not plain_text or not HAS_CRYPTO:
+        return plain_text
+    try:
+        f = Fernet(_get_machine_key())
+        return f.encrypt(plain_text.encode()).decode()
+    except Exception:
+        return plain_text
+
+
+def decrypt_password(cipher_text):
+    """解密密码"""
+    if not cipher_text or not HAS_CRYPTO:
+        return cipher_text
+    try:
+        f = Fernet(_get_machine_key())
+        return f.decrypt(cipher_text.encode()).decode()
+    except Exception:
+        # 解密失败说明是明文或密钥不匹配，返回原文
+        return cipher_text
+
+
+def load_settings():
+    """读取配置文件，不存在则返回默认配置"""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                # 兼容旧配置，补充缺失字段
+                for key, value in DEFAULT_SETTINGS.items():
+                    if key not in settings:
+                        settings[key] = value
+                    elif isinstance(value, dict):
+                        for k, v in value.items():
+                            if k not in settings[key]:
+                                settings[key][k] = v
+                # 解密密码
+                if "mysql" in settings and "password" in settings["mysql"]:
+                    settings["mysql"]["password"] = decrypt_password(settings["mysql"]["password"])
+                return settings
+        except Exception:
+            pass
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings(settings):
+    """保存配置文件（加密密码）"""
+    # 保存前加密密码
+    save_data = settings.copy()
+    if "mysql" in save_data and "password" in save_data["mysql"]:
+        save_data["mysql"] = save_data["mysql"].copy()
+        save_data["mysql"]["password"] = encrypt_password(save_data["mysql"]["password"])
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
+
 
 # Windows 毛玻璃 API
 class ACCENT_POLICY(Structure):
@@ -460,10 +566,97 @@ PRIORITY_CONFIG = {
 
 class TaskManager:
     def __init__(self):
+        self.settings = load_settings()
+        self.storage_mode = self.settings.get("storage", "json")
         self.data_file = os.path.join(DATA_DIR, "tasks.json")
+        self.db = None
+        self._mysql_initialized = False
+        self._async_lock = threading.Lock()
+
+        # 延迟 MySQL 连接，先用 JSON 模式快速启动
+        if self.storage_mode == "mysql" and not HAS_PYMYSQL:
+            print("警告: pymysql 未安装，回退到 JSON 模式")
+            self.storage_mode = "json"
+
         self.tasks = self.load_data()
 
+        # 检查是否需要数据迁移
+        self._check_migration()
+
+    def _run_async(self, func, *args):
+        """在后台线程执行数据库操作"""
+        if self.storage_mode == "mysql":
+            threading.Thread(target=func, args=args, daemon=True).start()
+        else:
+            # JSON 模式直接同步执行
+            func(*args)
+
+    def _init_mysql(self):
+        """初始化 MySQL 连接并建表"""
+        if self._mysql_initialized and self.db is not None:
+            try:
+                self.db.ping(reconnect=True)
+                return True
+            except:
+                self.db = None
+
+        mysql_cfg = self.settings["mysql"]
+        try:
+            self.db = pymysql.connect(
+                host=mysql_cfg["host"],
+                port=int(mysql_cfg["port"]),
+                user=mysql_cfg["user"],
+                password=mysql_cfg["password"],
+                database=mysql_cfg["database"],
+                charset="utf8mb4",
+                connect_timeout=MYSQL_CONNECT_TIMEOUT,
+                read_timeout=MYSQL_READ_TIMEOUT,
+                write_timeout=MYSQL_WRITE_TIMEOUT,
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            self._create_table()
+            self._mysql_initialized = True
+            return True
+        except Exception as e:
+            print(f"MySQL 连接失败: {e}")
+            self.db = None
+            return False
+
+    def _ensure_mysql(self):
+        """确保 MySQL 连接可用，失败则回退到 JSON"""
+        if not self._mysql_initialized:
+            if not self._init_mysql():
+                self.storage_mode = "json"
+                return False
+        return True
+
+    def _create_table(self):
+        """自动建表"""
+        sql = """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id VARCHAR(30) PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT,
+            priority VARCHAR(10),
+            type VARCHAR(20),
+            created_at VARCHAR(20),
+            deadline VARCHAR(20),
+            completed_at VARCHAR(20) NULL,
+            pinned TINYINT DEFAULT 0,
+            status VARCHAR(10) NOT NULL DEFAULT 'pending'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+        with self.db.cursor() as cursor:
+            cursor.execute(sql)
+        self.db.commit()
+
     def load_data(self):
+        if self.storage_mode == "mysql":
+            if self._ensure_mysql():
+                return self._load_from_mysql()
+        return self._load_from_json()
+
+    def _load_from_json(self):
         if os.path.exists(self.data_file):
             try:
                 with open(self.data_file, "r", encoding="utf-8") as f:
@@ -472,9 +665,224 @@ class TaskManager:
                 return {"pending": [], "completed": []}
         return {"pending": [], "completed": []}
 
+    def _check_migration(self):
+        """检查是否需要数据迁移"""
+        last_storage = self.settings.get("last_storage", "json")
+        current_storage = self.storage_mode
+
+        # 存储方式没变，不需要迁移
+        if last_storage == current_storage:
+            return
+
+        print(f"检测到存储方式变更: {last_storage} -> {current_storage}，开始迁移数据...")
+
+        try:
+            if last_storage == "json" and current_storage == "mysql":
+                # JSON -> MySQL
+                self._migrate_json_to_mysql()
+            elif last_storage == "mysql" and current_storage == "json":
+                # MySQL -> JSON
+                self._migrate_mysql_to_json()
+
+            # 迁移成功，更新 last_storage
+            self.settings["last_storage"] = current_storage
+            save_settings(self.settings)
+            print("数据迁移完成")
+        except Exception as e:
+            print(f"数据迁移失败: {e}")
+
+    def _merge_tasks(self, data_a, data_b):
+        """合并两个数据源的任务，按 ID 去重，保留更新的版本"""
+        merged = {"pending": [], "completed": []}
+        seen = {}
+
+        # 合并所有任务到一个列表
+        all_tasks = []
+        for task in data_a["pending"]:
+            all_tasks.append(("pending", task))
+        for task in data_a["completed"]:
+            all_tasks.append(("completed", task))
+        for task in data_b["pending"]:
+            all_tasks.append(("pending", task))
+        for task in data_b["completed"]:
+            all_tasks.append(("completed", task))
+
+        # 按 ID 去重，保留更新时间较新的
+        for status, task in all_tasks:
+            task_id = task["id"]
+            if task_id in seen:
+                _, existing_task = seen[task_id]
+                # 比较 completed_at 或 created_at
+                existing_time = existing_task.get("completed_at") or existing_task.get("created_at", "")
+                new_time = task.get("completed_at") or task.get("created_at", "")
+                if new_time >= existing_time:
+                    seen[task_id] = (status, task)
+            else:
+                seen[task_id] = (status, task)
+
+        # 分类到 pending 和 completed
+        for status, task in seen.values():
+            merged[status].append(task)
+
+        return merged
+
+    def _migrate_json_to_mysql(self):
+        """JSON 数据迁移到 MySQL（合并模式）"""
+        json_data = self._load_from_json()
+
+        # 连接 MySQL
+        try:
+            self._init_mysql()
+        except:
+            raise Exception("无法连接 MySQL")
+
+        # 读取 MySQL 现有数据
+        mysql_data = self._load_from_mysql()
+
+        # 合并数据
+        merged = self._merge_tasks(json_data, mysql_data)
+
+        # 写入 MySQL
+        with self.db.cursor() as cursor:
+            cursor.execute("DELETE FROM tasks")
+            for status in ["pending", "completed"]:
+                for task in merged[status]:
+                    cursor.execute(
+                        """INSERT INTO tasks
+                        (id, title, content, priority, type, created_at, deadline, completed_at, pinned, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (
+                            task["id"], task["title"], task.get("content", ""),
+                            task["priority"], task["type"], task["created_at"],
+                            task.get("deadline", ""), task.get("completed_at"),
+                            1 if task.get("pinned") else 0, status
+                        )
+                    )
+        self.db.commit()
+
+    def _migrate_mysql_to_json(self):
+        """MySQL 数据迁移到 JSON（合并模式）"""
+        # 连接 MySQL
+        if not self.db:
+            try:
+                self._init_mysql()
+            except:
+                raise Exception("无法连接 MySQL")
+
+        mysql_data = self._load_from_mysql()
+
+        # 读取 JSON 现有数据
+        json_data = self._load_from_json()
+
+        # 合并数据
+        merged = self._merge_tasks(mysql_data, json_data)
+
+        # 写入 JSON 文件
+        with open(self.data_file, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    def _load_from_mysql(self):
+        """从 MySQL 加载数据"""
+        tasks = {"pending": [], "completed": []}
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute("SELECT * FROM tasks ORDER BY created_at DESC")
+                rows = cursor.fetchall()
+                for row in rows:
+                    task = {
+                        "id": row["id"],
+                        "title": row["title"],
+                        "content": row["content"] or "",
+                        "priority": row["priority"],
+                        "type": row["type"],
+                        "created_at": row["created_at"],
+                        "deadline": row["deadline"] or "",
+                        "completed_at": row["completed_at"],
+                        "pinned": bool(row["pinned"])
+                    }
+                    if row["status"] == "completed":
+                        tasks["completed"].append(task)
+                    else:
+                        tasks["pending"].append(task)
+        except Exception as e:
+            print(f"MySQL 读取失败: {e}")
+        return tasks
+
     def save_data(self):
+        if self.storage_mode == "mysql":
+            if self._ensure_mysql():
+                self._save_to_mysql()
+            else:
+                # MySQL 不可用，保存到 JSON 作为备份
+                self._save_to_json()
+        else:
+            self._save_to_json()
+
+    def _save_to_json(self):
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+
+    def _save_to_mysql(self):
+        """全量同步到 MySQL（批量操作时使用）"""
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute("DELETE FROM tasks")
+                for status in ["pending", "completed"]:
+                    for task in self.tasks[status]:
+                        cursor.execute(
+                            """INSERT INTO tasks
+                            (id, title, content, priority, type, created_at, deadline, completed_at, pinned, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            (
+                                task["id"], task["title"], task.get("content", ""),
+                                task["priority"], task["type"], task["created_at"],
+                                task.get("deadline", ""), task.get("completed_at"),
+                                1 if task.get("pinned") else 0, status
+                            )
+                        )
+            self.db.commit()
+        except Exception as e:
+            print(f"MySQL 写入失败: {e}")
+            try:
+                self._init_mysql()
+            except:
+                pass
+
+    def _mysql_update_task(self, task_id, status, task):
+        """增量更新单条任务到 MySQL"""
+        if not self._ensure_mysql():
+            return
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO tasks
+                    (id, title, content, priority, type, created_at, deadline, completed_at, pinned, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    title=VALUES(title), content=VALUES(content), priority=VALUES(priority),
+                    type=VALUES(type), deadline=VALUES(deadline), completed_at=VALUES(completed_at),
+                    pinned=VALUES(pinned), status=VALUES(status)""",
+                    (
+                        task["id"], task["title"], task.get("content", ""),
+                        task["priority"], task["type"], task["created_at"],
+                        task.get("deadline", ""), task.get("completed_at"),
+                        1 if task.get("pinned") else 0, status
+                    )
+                )
+            self.db.commit()
+        except Exception as e:
+            print(f"MySQL 更新失败: {e}")
+
+    def _mysql_delete_task(self, task_id):
+        """从 MySQL 删除单条任务"""
+        if not self._ensure_mysql():
+            return
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
+            self.db.commit()
+        except Exception as e:
+            print(f"MySQL 删除失败: {e}")
 
     def add_task(self, title, priority="中", task_type="普通", content="", deadline=""):
         task = {
@@ -489,7 +897,9 @@ class TaskManager:
             "pinned": False
         }
         self.tasks["pending"].append(task)
-        self.save_data()
+        self._run_async(self._mysql_update_task, task["id"], "pending", task)
+        if self.storage_mode != "mysql":
+            self._save_to_json()
         return task
 
     def update_task(self, task_id, updates):
@@ -497,16 +907,19 @@ class TaskManager:
         for task in self.tasks["pending"]:
             if task["id"] == task_id:
                 task.update(updates)
-                self.save_data()
+                self._run_async(self._mysql_update_task, task_id, "pending", task)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         for task in self.tasks["completed"]:
             if task["id"] == task_id:
-                # 保留 completed_at 不被覆盖
                 completed_at = task.get("completed_at")
                 task.update(updates)
                 if completed_at:
                     task["completed_at"] = completed_at
-                self.save_data()
+                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         return False
 
@@ -516,7 +929,9 @@ class TaskManager:
                 task["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 self.tasks["completed"].insert(0, task)
                 self.tasks["pending"].pop(i)
-                self.save_data()
+                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         return False
 
@@ -524,7 +939,9 @@ class TaskManager:
         for i, task in enumerate(self.tasks["pending"]):
             if task["id"] == task_id:
                 self.tasks["pending"].pop(i)
-                self.save_data()
+                self._run_async(self._mysql_delete_task, task_id)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         return False
 
@@ -535,7 +952,9 @@ class TaskManager:
                 task["completed_at"] = None
                 self.tasks["pending"].append(task)
                 self.tasks["completed"].pop(i)
-                self.save_data()
+                self._run_async(self._mysql_update_task, task_id, "pending", task)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         return False
 
@@ -544,7 +963,9 @@ class TaskManager:
         for task in self.tasks["completed"]:
             if task["id"] == task_id:
                 task["pinned"] = not task.get("pinned", False)
-                self.save_data()
+                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                if self.storage_mode != "mysql":
+                    self._save_to_json()
                 return True
         return False
 
@@ -925,6 +1346,426 @@ class TaskDetailDialog(QDialog):
         self._drag_pos = None
 
 
+# ========== 设置对话框 ==========
+class SettingsDialog(QDialog):
+    """设置弹窗：数据存储配置"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setFixedSize(420, 540)
+        self._drag_pos = None
+        self.settings = load_settings()
+        self.result_saved = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        # 外层阴影容器
+        shadow_frame = QFrame(self)
+        shadow_frame.setGeometry(10, 10, 400, 520)
+        shadow_frame.setStyleSheet("""
+            QFrame {
+                background: white;
+                border-radius: 16px;
+                border: 1px solid rgba(0, 0, 0, 0.08);
+            }
+        """)
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow_frame.setGraphicsEffect(shadow)
+
+        # 主容器
+        container = QWidget(self)
+        container.setGeometry(10, 10, 400, 520)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        # 标题栏
+        title_bar = QHBoxLayout()
+        title_label = QLabel("⚙ 设置")
+        title_label.setStyleSheet("font-size: 18px; font-weight: 600; color: #1d1d1f;")
+        title_bar.addWidget(title_label)
+        title_bar.addStretch()
+        close_btn = WindowControlButton("close")
+        close_btn.setObjectName("closeBtn")
+        close_btn.clicked.connect(self.reject)
+        title_bar.addWidget(close_btn)
+        layout.addLayout(title_bar)
+
+        # 分隔线
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #e0e0e0;")
+        layout.addWidget(line)
+
+        # 存储方式选择
+        storage_row = QHBoxLayout()
+        storage_label = QLabel("数据存储方式")
+        storage_label.setStyleSheet("font-size: 14px; font-weight: 500; color: #1d1d1f;")
+        storage_row.addWidget(storage_label)
+        storage_row.addStretch()
+
+        self.storage_combo = QComboBox()
+        self.storage_combo.setFixedWidth(180)
+        self.storage_combo.addItems(["本地文件", "MySQL"])
+        self.storage_combo.setStyleSheet("""
+            QComboBox {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 6px 12px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QComboBox:hover {
+                border: 1px solid #c0c0c0;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                selection-background-color: rgba(0, 122, 255, 0.1);
+                selection-color: #1d1d1f;
+                padding: 4px;
+            }
+        """)
+        if self.settings.get("storage", "json") == "mysql":
+            self.storage_combo.setCurrentIndex(1)
+        self.storage_combo.currentIndexChanged.connect(self._on_storage_changed)
+        storage_row.addWidget(self.storage_combo)
+        layout.addLayout(storage_row)
+
+        # 如果没安装 pymysql，显示提示
+        if not HAS_PYMYSQL:
+            mysql_hint = QLabel("⚠️ 使用 MySQL 需安装 pymysql: pip install pymysql")
+            mysql_hint.setStyleSheet("font-size: 11px; color: #FF9500; margin-top: 4px;")
+            layout.addWidget(mysql_hint)
+
+        # MySQL 配置区域
+        self.mysql_config = QWidget()
+        mysql_layout = QVBoxLayout(self.mysql_config)
+        mysql_layout.setContentsMargins(8, 16, 8, 0)
+        mysql_layout.setSpacing(16)
+
+        mysql_cfg = self.settings.get("mysql", {})
+        label_width = 70
+        label_style = "font-size: 12px; color: #636366; padding-top: 7px; font-weight: 500;"
+
+        # 主机地址
+        host_row = QHBoxLayout()
+        host_row.setAlignment(Qt.AlignVCenter)
+        host_label = QLabel("主机地址:")
+        host_label.setFixedWidth(label_width)
+        host_label.setStyleSheet(label_style)
+        host_label.setAlignment(Qt.AlignVCenter)
+        self.host_input = QLineEdit(mysql_cfg.get("host", ""))
+        self.host_input.setPlaceholderText("例如: 127.0.0.1")
+        self._style_input(self.host_input)
+        host_row.addWidget(host_label)
+        host_row.addWidget(self.host_input)
+        mysql_layout.addLayout(host_row)
+
+        # 端口
+        port_row = QHBoxLayout()
+        port_row.setAlignment(Qt.AlignVCenter)
+        port_label = QLabel("端口:")
+        port_label.setFixedWidth(label_width)
+        port_label.setStyleSheet(label_style)
+        port_label.setAlignment(Qt.AlignVCenter)
+        self.port_input = QLineEdit(str(mysql_cfg.get("port", 3306)))
+        self.port_input.setPlaceholderText("3306")
+        self._style_input(self.port_input)
+        port_row.addWidget(port_label)
+        port_row.addWidget(self.port_input)
+        mysql_layout.addLayout(port_row)
+
+        # 用户名
+        user_row = QHBoxLayout()
+        user_row.setAlignment(Qt.AlignVCenter)
+        user_label = QLabel("用户名:")
+        user_label.setFixedWidth(label_width)
+        user_label.setStyleSheet(label_style)
+        user_label.setAlignment(Qt.AlignVCenter)
+        self.user_input = QLineEdit(mysql_cfg.get("user", ""))
+        self.user_input.setPlaceholderText("数据库用户名")
+        self._style_input(self.user_input)
+        user_row.addWidget(user_label)
+        user_row.addWidget(self.user_input)
+        mysql_layout.addLayout(user_row)
+
+        # 密码
+        pwd_row = QHBoxLayout()
+        pwd_row.setAlignment(Qt.AlignVCenter)
+        pwd_label = QLabel("密码:")
+        pwd_label.setFixedWidth(label_width)
+        pwd_label.setStyleSheet(label_style)
+        pwd_label.setAlignment(Qt.AlignVCenter)
+        self.pwd_input = QLineEdit(mysql_cfg.get("password", ""))
+        self.pwd_input.setPlaceholderText("数据库密码")
+        self.pwd_input.setEchoMode(QLineEdit.Password)
+        self._style_input(self.pwd_input)
+        pwd_row.addWidget(pwd_label)
+        pwd_row.addWidget(self.pwd_input)
+        mysql_layout.addLayout(pwd_row)
+
+        # 数据库名
+        db_row = QHBoxLayout()
+        db_row.setAlignment(Qt.AlignVCenter)
+        db_label = QLabel("数据库名:")
+        db_label.setFixedWidth(label_width)
+        db_label.setStyleSheet(label_style)
+        db_label.setAlignment(Qt.AlignVCenter)
+        self.db_input = QLineEdit(mysql_cfg.get("database", "dailyinfo"))
+        self.db_input.setPlaceholderText("dailyinfo")
+        self._style_input(self.db_input)
+        db_row.addWidget(db_label)
+        db_row.addWidget(self.db_input)
+        mysql_layout.addLayout(db_row)
+
+        # 测试连接按钮
+        self.test_btn = QPushButton("测试连接")
+        self.test_btn.setFixedHeight(32)
+        self.test_btn.setCursor(Qt.PointingHandCursor)
+        self.test_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 122, 255, 0.1);
+                color: #007AFF;
+                border: 1px solid rgba(0, 122, 255, 0.2);
+                border-radius: 8px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: rgba(0, 122, 255, 0.18);
+            }
+        """)
+        self.test_btn.clicked.connect(self._test_connection)
+        mysql_layout.addWidget(self.test_btn)
+
+        # 提示文字
+        self.hint_label = QLabel("")
+        self.hint_label.setStyleSheet("font-size: 11px; color: #8e8e93;")
+        self.hint_label.setWordWrap(True)
+        mysql_layout.addWidget(self.hint_label)
+
+        layout.addWidget(self.mysql_config)
+
+        # 根据当前选择显示/隐藏 MySQL 配置
+        self.mysql_config.setVisible(self.storage_combo.currentIndex() == 1)
+
+        layout.addStretch()
+
+        # 提示
+        tip = QLabel("切换存储方式需重启应用生效")
+        tip.setStyleSheet("font-size: 11px; color: #c0c0c0; font-style: italic;")
+        tip.setAlignment(Qt.AlignCenter)
+        layout.addWidget(tip)
+
+        # 底部按钮
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setFixedSize(80, 34)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(142, 142, 147, 0.12);
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                color: #636366;
+            }
+            QPushButton:hover {
+                background: rgba(142, 142, 147, 0.22);
+            }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+
+        save_btn = QPushButton("保存")
+        save_btn.setFixedSize(80, 34)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background: #007AFF;
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                color: white;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #0056CC;
+            }
+        """)
+        save_btn.clicked.connect(self._save)
+
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def _style_input(self, input_widget):
+        input_widget.setFixedHeight(32)
+        input_widget.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255, 255, 255, 0.6);
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                border-radius: 6px;
+                padding: 0 10px;
+                font-size: 12px;
+                color: #1d1d1f;
+            }
+            QLineEdit:focus {
+                border: 1px solid rgba(0, 122, 255, 0.4);
+                background: white;
+            }
+        """)
+        # 中文右键菜单
+        input_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        input_widget.customContextMenuRequested.connect(lambda pos, w=input_widget: self._show_context_menu(pos, w))
+
+    def _show_context_menu(self, pos, line_edit):
+        """中文右键菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 8px 24px;
+                font-size: 13px;
+            }
+            QMenu::item:selected {
+                background: #f0f0f0;
+                border-radius: 4px;
+            }
+            QMenu::item:disabled {
+                color: #c0c0c0;
+            }
+        """)
+
+        has_selection = line_edit.hasSelectedText()
+        has_text = len(line_edit.text()) > 0
+        has_clipboard = QApplication.clipboard().text() != ""
+
+        undo_action = QAction("撤销", self)
+        undo_action.setEnabled(line_edit.isUndoAvailable())
+        undo_action.triggered.connect(line_edit.undo)
+        menu.addAction(undo_action)
+
+        redo_action = QAction("重做", self)
+        redo_action.setEnabled(line_edit.isRedoAvailable())
+        redo_action.triggered.connect(line_edit.redo)
+        menu.addAction(redo_action)
+
+        menu.addSeparator()
+
+        cut_action = QAction("剪切", self)
+        cut_action.setEnabled(has_selection)
+        cut_action.triggered.connect(line_edit.cut)
+        menu.addAction(cut_action)
+
+        copy_action = QAction("复制", self)
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(line_edit.copy)
+        menu.addAction(copy_action)
+
+        paste_action = QAction("粘贴", self)
+        paste_action.setEnabled(has_clipboard)
+        paste_action.triggered.connect(line_edit.paste)
+        menu.addAction(paste_action)
+
+        delete_action = QAction("删除", self)
+        delete_action.setEnabled(has_selection)
+        delete_action.triggered.connect(line_edit.del_)
+        menu.addAction(delete_action)
+
+        menu.addSeparator()
+
+        select_all_action = QAction("全选", self)
+        select_all_action.setEnabled(has_text)
+        select_all_action.triggered.connect(line_edit.selectAll)
+        menu.addAction(select_all_action)
+
+        menu.exec(line_edit.mapToGlobal(pos))
+
+    def _on_storage_changed(self, index):
+        """切换存储方式"""
+        self.mysql_config.setVisible(index == 1)
+
+    def _test_connection(self):
+        """测试 MySQL 连接，自动创建数据库"""
+        if not HAS_PYMYSQL:
+            self.hint_label.setText("❌ 请先安装 pymysql: pip install pymysql")
+            self.hint_label.setStyleSheet("font-size: 11px; color: #FF3B30;")
+            return
+
+        host = self.host_input.text().strip()
+        port = int(self.port_input.text().strip() or 3306)
+        user = self.user_input.text().strip()
+        password = self.pwd_input.text()
+        database = self.db_input.text().strip() or "dailyinfo"
+
+        try:
+            # 先不指定数据库，测试能否连上服务器
+            conn = pymysql.connect(
+                host=host, port=port, user=user, password=password,
+                charset="utf8mb4", connect_timeout=5
+            )
+            with conn.cursor() as cursor:
+                # 自动创建数据库（如果不存在）
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database}` DEFAULT CHARACTER SET utf8mb4")
+            conn.close()
+
+            # 再连接到目标数据库验证
+            conn = pymysql.connect(
+                host=host, port=port, user=user, password=password,
+                database=database, charset="utf8mb4", connect_timeout=5
+            )
+            conn.close()
+            self.hint_label.setText(f"✅ 连接成功，数据库 `{database}` 已就绪")
+            self.hint_label.setStyleSheet("font-size: 11px; color: #34C759;")
+        except Exception as e:
+            self.hint_label.setText(f"❌ 连接失败: {e}")
+            self.hint_label.setStyleSheet("font-size: 11px; color: #FF3B30;")
+
+    def _save(self):
+        """保存配置"""
+        self.settings["storage"] = "mysql" if self.storage_combo.currentIndex() == 1 else "json"
+        self.settings["mysql"] = {
+            "host": self.host_input.text().strip(),
+            "port": int(self.port_input.text().strip() or 3306),
+            "user": self.user_input.text().strip(),
+            "password": self.pwd_input.text(),
+            "database": self.db_input.text().strip() or "dailyinfo"
+        }
+        save_settings(self.settings)
+        self.result_saved = True
+        self.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+
 # ========== 主应用 ==========
 class WindowControlButton(QPushButton):
     """绘制型窗口控制按钮，避免字符图标的基线偏移"""
@@ -967,6 +1808,59 @@ class WindowControlButton(QPushButton):
             painter.drawLine(center_x + 5, center_y - 5, center_x - 5, center_y + 5)
 
 
+class EyeToggleButton(QPushButton):
+    """表头小眼睛按钮，避免依赖 QHeaderView section 自绘。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        clean_button_focus(self)
+        self.show_all_plan_tasks = False
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_show_all_plan_tasks(self, show_all):
+        self.show_all_plan_tasks = show_all
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        border_color = QColor(0, 122, 255, 95) if self.show_all_plan_tasks else QColor("#c7c7cc")
+        bg_color = QColor(0, 122, 255, 28) if self.show_all_plan_tasks else QColor(255, 255, 255, 150)
+        icon_color = QColor("#007AFF") if self.show_all_plan_tasks else QColor("#8e8e93")
+        if self.underMouse():
+            border_color = QColor(0, 122, 255, 110)
+            bg_color = QColor(0, 122, 255, 36)
+            icon_color = QColor("#007AFF")
+        if self.isDown():
+            border_color = QColor(0, 122, 255, 135)
+            bg_color = QColor(0, 122, 255, 55)
+
+        button_rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(button_rect, 5, 5)
+
+        center_x = self.rect().center().x() + 1
+        center_y = self.rect().center().y() + 1
+        eye_rect = QRect(center_x - 8, center_y - 5, 16, 10)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(icon_color, 1.5))
+        painter.drawEllipse(eye_rect)
+        painter.setBrush(icon_color)
+        painter.drawEllipse(QRect(center_x - 2, center_y - 2, 4, 4))
+
+        if not self.show_all_plan_tasks:
+            slash_pen = QPen(icon_color, 1.7)
+            slash_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(slash_pen)
+            painter.drawLine(center_x - 8, center_y + 7, center_x + 8, center_y - 7)
+
+
 class TaskHeaderView(QHeaderView):
     """任务列表表头，负责绘制和切换6天外计划任务的小眼睛。"""
 
@@ -978,8 +1872,13 @@ class TaskHeaderView(QHeaderView):
         self.show_all_plan_tasks = False
         self.toggle_pressed = False
         self.toggle_hovered = False
+        self.toggle_button = EyeToggleButton(self.viewport())
+        self.toggle_button.hide()
+        self.toggle_button.clicked.connect(self.toggleVisibilityClicked)
         self.setSectionsClickable(True)
         self.setMouseTracking(True)
+        self.sectionResized.connect(lambda *_: self.update_toggle_button_geometry())
+        self.sectionMoved.connect(lambda *_: self.update_toggle_button_geometry())
 
     def set_toggle_visible(self, visible):
         self.toggle_visible = visible
@@ -987,10 +1886,13 @@ class TaskHeaderView(QHeaderView):
             self.toggle_pressed = False
             self.toggle_hovered = False
             self.unsetCursor()
+        self.toggle_button.setVisible(visible)
+        self.update_toggle_button_geometry()
         self.viewport().update()
 
     def set_show_all_plan_tasks(self, show_all):
         self.show_all_plan_tasks = show_all
+        self.toggle_button.set_show_all_plan_tasks(show_all)
         self.setToolTip("显示全部计划任务" if show_all else "隐藏6天外计划任务")
         self.viewport().update()
 
@@ -1000,6 +1902,18 @@ class TaskHeaderView(QHeaderView):
         x = section_rect.x() + (section_rect.width() - width) // 2 + 1
         y = section_rect.y() + (section_rect.height() - height) // 2
         return QRect(x, y, width, height)
+
+    def update_toggle_button_geometry(self):
+        if not self.toggle_visible:
+            return
+        section_rect = QRect(
+            self.sectionViewportPosition(0),
+            0,
+            self.sectionSize(0),
+            self.height()
+        )
+        self.toggle_button.setGeometry(self._toggle_rect(section_rect))
+        self.toggle_button.raise_()
 
     def _is_toggle_point(self, point):
         if not self.toggle_visible or self.logicalIndexAt(point) != 0:
@@ -1019,43 +1933,7 @@ class TaskHeaderView(QHeaderView):
         super().paintSection(painter, rect, logicalIndex)
         if logicalIndex != 0 or not self.toggle_visible:
             return
-
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        button_rect = self._toggle_rect(rect)
-        border_color = QColor(0, 122, 255, 95) if self.show_all_plan_tasks else QColor("#c7c7cc")
-        bg_color = QColor(0, 122, 255, 28) if self.show_all_plan_tasks else QColor(255, 255, 255, 150)
-        icon_color = QColor("#007AFF") if self.show_all_plan_tasks else QColor("#8e8e93")
-        if self.toggle_hovered:
-            border_color = QColor(0, 122, 255, 110)
-            bg_color = QColor(0, 122, 255, 36)
-            icon_color = QColor("#007AFF")
-        if self.toggle_pressed:
-            border_color = QColor(0, 122, 255, 135)
-            bg_color = QColor(0, 122, 255, 55)
-
-        painter.setPen(QPen(border_color, 2))
-        painter.setBrush(bg_color)
-        painter.drawRoundedRect(button_rect, 5, 5)
-
-        center_x = button_rect.center().x() + 1
-        center_y = button_rect.center().y() + 1
-        eye_rect = QRect(center_x - 8, center_y - 5, 16, 10)
-
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(icon_color, 1.5))
-        painter.drawEllipse(eye_rect)
-        painter.setBrush(icon_color)
-        painter.drawEllipse(QRect(center_x - 2, center_y - 2, 4, 4))
-
-        if not self.show_all_plan_tasks:
-            slash_pen = QPen(icon_color, 1.7)
-            slash_pen.setCapStyle(Qt.RoundCap)
-            painter.setPen(slash_pen)
-            painter.drawLine(center_x - 8, center_y + 7, center_x + 8, center_y - 7)
-
-        painter.restore()
+        self.update_toggle_button_geometry()
 
     def mouseMoveEvent(self, event):
         is_hovered = self._is_toggle_event(event)
@@ -1427,6 +2305,26 @@ class TaskApp(QMainWindow):
         footer_layout.addWidget(self.stats_label)
         footer_layout.addStretch()
 
+        # 设置按钮
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setFixedSize(28, 28)
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                font-size: 16px;
+                color: #8e8e93;
+            }
+            QPushButton:hover {
+                background: rgba(142, 142, 147, 0.12);
+                color: #636366;
+            }
+        """)
+        self.settings_btn.clicked.connect(self.show_settings)
+        footer_layout.addWidget(self.settings_btn)
+
         main_layout.addWidget(footer)
 
         self.outer_layout.addWidget(self.glass)
@@ -1790,6 +2688,13 @@ class TaskApp(QMainWindow):
         outer.addWidget(container)
 
         dlg.exec()
+
+    def show_settings(self):
+        """打开设置弹窗"""
+        dlg = SettingsDialog(self)
+        dlg.exec()
+        if dlg.result_saved:
+            QMessageBox.information(self, "提示", "配置已保存，重启应用后生效。")
 
     def show_history(self):
         """显示历史页面"""
