@@ -1,8 +1,14 @@
-# Dailyinfo V3.0
+# Dailyinfo V3.1.1
 
 > 每日任务管理工具 | Windows + Android 双端支持
 
-Dailyinfo 是一款轻量级的每日任务管理工具，支持 Windows 桌面端和 Android 移动端。Windows 端采用 PySide6 构建，界面设计灵感来自 macOS 毛玻璃风格；Android 端采用 Kotlin + Jetpack Compose 构建，提供原生 Material Design 体验。两端共享数据格式，支持本地 JSON 和远程 MySQL 双存储模式。
+Dailyinfo 是一款轻量级的每日任务管理工具，支持 Windows 桌面端，并正在开发 Android 移动端。Windows 端采用 PySide6 构建，界面设计灵感来自 macOS 毛玻璃风格；Android 端采用 Kotlin + Jetpack Compose 构建，当前基础工程已上传，但功能还没做完。两端目标是共享数据格式，支持本地 JSON 和远程 MySQL 双存储模式。
+
+## 当前状态
+
+- **Windows 端**：当前主力版本，支持日常任务管理、历史记录、搜索、日历和 JSON/MySQL 双存储。
+- **Android 端**：基础工程、页面结构和部分组件已提交，功能仍在开发中，暂不作为完整可用版本。
+- **共享逻辑**：`Shared/` 目录用于沉淀跨端数据模型和日期算法参考。
 
 ## 功能特性
 
@@ -55,16 +61,17 @@ pip install PySide6 cryptography pymysql pyinstaller
 ### 运行程序
 
 ```bash
-python Code/daily_tasks.py
+python Windows/Code/daily_tasks.py
 ```
 
 ### 打包为可执行文件
 
 ```bash
+cd Windows
 python -m PyInstaller 每日任务管理.spec --clean
 ```
 
-打包完成后，可执行文件位于 `dist/Dailyinfo.exe`。打包配置文件为本地打包资源，默认不提交到仓库。
+打包完成后，可执行文件位于 `Windows/dist/Dailyinfo.exe`。打包配置文件位于 `Windows/每日任务管理.spec`。
 
 ## 配置说明
 
@@ -128,7 +135,6 @@ Dailyinfo/
 ├── Macos/                        # macOS 端（待开发）
 ├── Ios/                          # iOS 端（待开发）
 ├── README.md                     # 项目说明文档
-├── AGENTS.md                     # AI 代理协作说明
 └── CLAUDE.md                     # 本地协作配置
 ```
 
@@ -164,7 +170,7 @@ Dailyinfo/
 
 ### 性能优化
 
-- 延迟数据库连接：启动时使用 JSON 模式，首次操作 MySQL 时才建立连接
+- 启动数据源隔离：MySQL 模式不再先渲染本地 JSON 旧数据
 - 异步操作：数据库读写在后台线程执行，不阻塞 UI
 - 增量更新：单条记录操作，避免全量同步
 - 本地回退：MySQL 不可用时保留 JSON 保存路径，降低数据丢失风险
@@ -194,18 +200,29 @@ logging.basicConfig(level=logging.DEBUG)
 
 ## 更新日志
 
+### V3.1.1 (2026-06-21)
+
+**问题修复**
+- 修复历史页面右键菜单中置顶按钮出现黑边的问题。
+- 修复所有待办任务完成后，主页面任务表头跟随空列表一起消失的问题。
+- 修复任务详情页输入框右键菜单显示英文的问题，并统一排查右键菜单中文化。
+- 修复 MySQL 模式首次打开时先显示本地旧数据，随后刷新才显示正确数据的问题。
+
+**状态说明**
+- Android 端基础工程已上传，但功能还没做完，当前完整可用版本仍以 Windows 端为主。
+
 ### V3.1 (2026-06-13)
 
 **新功能**
-- 新增 Android 移动端，采用 Kotlin + Jetpack Compose
+- 新增 Android 移动端基础工程，采用 Kotlin + Jetpack Compose
 - 新增 Shared 目录，提取共享逻辑作为 Kotlin 实现参考
-- Android 端支持任务 CRUD、搜索、历史、详情编辑
-- Android 端内置农历、节假日、节气显示
+- Android 端已提交任务列表、搜索、历史和详情页的初步页面结构
+- Android 端已迁移部分农历、节假日、节气显示逻辑
 - 新增图标转换脚本，支持自动生成多尺寸 PNG
 
 **架构优化**
 - 项目结构调整为 Windows + Android 双端架构
-- 数据格式保持一致，两端可共享 tasks.json
+- 数据格式按跨端共享目标设计，后续继续补齐 Android 端完整读写流程
 - .gitignore 更新，排除 Android 构建产物
 
 ### V3.0 (2026-06-13)
