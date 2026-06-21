@@ -1,8 +1,8 @@
 # Dailyinfo V3.0
 
-> 每日任务管理工具 | PySide6 毛玻璃风格
+> 每日任务管理工具 | Windows + Android 双端支持
 
-Dailyinfo 是一款轻量级的 Windows 桌面任务管理工具，采用 PySide6 构建，界面设计灵感来自 macOS 毛玻璃风格。支持本地 JSON 和远程 MySQL 双存储模式，数据可在两种模式间无缝切换，适合个人日常任务管理和团队协作场景。
+Dailyinfo 是一款轻量级的每日任务管理工具，支持 Windows 桌面端和 Android 移动端。Windows 端采用 PySide6 构建，界面设计灵感来自 macOS 毛玻璃风格；Android 端采用 Kotlin + Jetpack Compose 构建，提供原生 Material Design 体验。两端共享数据格式，支持本地 JSON 和远程 MySQL 双存储模式。
 
 ## 功能特性
 
@@ -100,30 +100,36 @@ python -m PyInstaller 每日任务管理.spec --clean
 ## 项目结构
 
 ```text
-每日任务/
-├── Code/
-│   └── daily_tasks.py          # 主程序代码
-├── docs/
-│   └── ui_terms.md             # UI 区块命名规范
-├── Ico/
-│   └── 岚兮儿天下无敌好看.ico  # 应用图标
-├── README.md                   # 项目说明文档
-├── AGENTS.md                   # AI 代理协作说明
-├── start.bat                   # 本地启动脚本
-└── go.vbs                      # 本地静默启动脚本
-```
-
-运行或打包过程中会生成以下本地文件和目录，默认不提交到 GitHub：
-
-```text
-Data/
-├── tasks.json                  # JSON 模式任务数据
-└── settings.json               # 存储配置和加密后的数据库密码
-
-build/                          # PyInstaller 构建缓存
-dist/                           # PyInstaller 输出目录
-每日任务管理.spec                # 本地打包配置
-CLAUDE.md                       # 本地协作配置
+Dailyinfo/
+├── Shared/                       # 跨平台共享目录
+│   ├── docs/
+│   │   └── ui_terms.md           # UI 术语对照表
+│   ├── calendar_utils.py         # 农历/节假日算法
+│   ├── task_model.py             # 任务数据模型
+│   └── README.md                 # 共享目录说明
+├── Data/                         # 共享数据文件
+│   ├── tasks.json                # JSON 模式任务数据
+│   └── settings.json             # 存储配置
+├── Ico/                          # 共享图标资源
+│   └── 岚兮儿天下无敌好看.ico
+├── Windows/                      # Windows 端
+│   ├── Code/
+│   │   └── daily_tasks.py        # 主程序代码
+│   ├── go.vbs                    # 静默启动脚本
+│   ├── 每日任务管理.spec          # PyInstaller 打包配置
+│   ├── build/                    # 构建缓存
+│   └── dist/                     # 打包输出
+├── Android/                      # Android 端
+│   ├── app/src/main/
+│   │   ├── java/com/dailyinfo/   # Kotlin 源码
+│   │   └── res/                  # 资源文件
+│   ├── build.gradle.kts          # Gradle 构建配置
+│   └── convert_icon.py           # 图标转换脚本
+├── Macos/                        # macOS 端（待开发）
+├── Ios/                          # iOS 端（待开发）
+├── README.md                     # 项目说明文档
+├── AGENTS.md                     # AI 代理协作说明
+└── CLAUDE.md                     # 本地协作配置
 ```
 
 ## 技术架构
@@ -142,11 +148,19 @@ CLAUDE.md                       # 本地协作配置
 
 ### 技术栈
 
+#### Windows 端
 - **UI 框架**：PySide6 (Qt for Python)
 - **打包工具**：PyInstaller
 - **窗口效果**：Windows Desktop Window Manager API
 - **数据库**：PyMySQL（可选）
 - **加密**：cryptography (Fernet)
+
+#### Android 端
+- **开发语言**：Kotlin
+- **UI 框架**：Jetpack Compose
+- **设计规范**：Material Design 3
+- **JSON 解析**：Gson
+- **日期时间**：kotlinx-datetime
 
 ### 性能优化
 
@@ -179,6 +193,20 @@ logging.basicConfig(level=logging.DEBUG)
 - 生成的 exe 文件为单文件，包含所有资源
 
 ## 更新日志
+
+### V3.1 (2026-06-13)
+
+**新功能**
+- 新增 Android 移动端，采用 Kotlin + Jetpack Compose
+- 新增 Shared 目录，提取共享逻辑作为 Kotlin 实现参考
+- Android 端支持任务 CRUD、搜索、历史、详情编辑
+- Android 端内置农历、节假日、节气显示
+- 新增图标转换脚本，支持自动生成多尺寸 PNG
+
+**架构优化**
+- 项目结构调整为 Windows + Android 双端架构
+- 数据格式保持一致，两端可共享 tasks.json
+- .gitignore 更新，排除 Android 构建产物
 
 ### V3.0 (2026-06-13)
 

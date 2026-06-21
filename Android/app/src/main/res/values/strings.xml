@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dailyinfo</string>
+    <string name="tab_tasks">待办任务</string>
+    <string name="tab_history">历史</string>
+    <string name="tab_search">搜索</string>
+    <string name="add_task">添加</string>
+    <string name="search_hint">搜索任务...</string>
+    <string name="task_input_hint">输入任务标题...</string>
+    <string name="priority_plan">计划</string>
+    <string name="priority_high">高</string>
+    <string name="priority_medium">中</string>
+    <string name="priority_low">低</string>
+    <string name="empty_tasks">暂无待办任务</string>
+    <string name="empty_history">暂无历史任务</string>
+    <string name="empty_search">未找到匹配任务</string>
+    <string name="stats_format">待办 %d · 今日完成 %d · 历史 %d</string>
+    <string name="settings">设置</string>
+    <string name="task_detail">任务详情</string>
+    <string name="deadline">截止日期</string>
+    <string name="created_at">创建时间</string>
+    <string name="completed_at">完成时间</string>
+    <string name="save">保存</string>
+    <string name="cancel">取消</string>
+    <string name="delete">删除</string>
+    <string name="complete">完成</string>
+    <string name="uncomplete">取消完成</string>
+    <string name="pin">置顶</string>
+    <string name="unpin">取消置顶</string>
+    <string name="overdue">已过期</string>
+    <string name="hide_future_plan">隐藏6天外计划</string>
+    <string name="show_future_plan">显示全部计划</string>
+    <string name="future_plan_hidden">6天外计划任务已隐藏</string>
+    <string name="convert_to_normal">转为普通任务</string>
+    <string name="convert_to_plan">转为计划任务</string>
+    <string name="select_priority">选择优先级</string>
+    <string name="select_deadline">选择截止日期</string>
+    <string name="search_input_hint">搜索任务...</string>
+    <string name="no_content">无内容</string>
+    <string name="type_conversion">类型转换</string>
+</resources>

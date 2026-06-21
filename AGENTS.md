@@ -2,7 +2,15 @@
 
 本文档用于指导 Codex 在本仓库内工作。
 
-当前项目版本：V3.0。
+当前项目版本：V3.1。
+
+## 项目概述
+
+Dailyinfo 是每日任务管理工具，支持 Windows 桌面端和 Android 移动端：
+
+- **Windows 端**：PySide6 开发，界面采用无边框窗口、圆角容器、毛玻璃效果和自绘窗口控制按钮
+- **Android 端**：Kotlin + Jetpack Compose 开发，采用 Material Design 3 设计规范
+- **数据共享**：两端使用相同的 tasks.json 格式，支持本地 JSON 和远程 MySQL 双存储模式
 
 ## 基本约束
 
@@ -15,20 +23,28 @@
 - 所有 sql 相关语句、解释和语法统一使用小写。
 - 不使用上标字符，平方写成 `x^2`，Python 代码写成 `x**2`。
 
-## 项目概述
-
-Dailyinfo 是 Windows 桌面每日任务管理工具，使用 PySide6 开发，界面采用无边框窗口、圆角容器、毛玻璃效果和自绘窗口控制按钮。V3.0 支持本地 JSON 和远程 MySQL 双存储模式，可通过设置弹窗切换。
-
-主程序是单文件应用：
+## 目录结构
 
 ```text
-Code/daily_tasks.py
+Shared/                      # 跨平台共享目录
+  ├── docs/ui_terms.md       # UI 术语对照表
+  ├── calendar_utils.py      # 农历/节假日算法
+  └── task_model.py          # 任务数据模型
+Data/                        # 共享数据文件
+Ico/                         # 共享图标资源
+Windows/                     # Windows 端
+  └── Code/daily_tasks.py    # 主程序
+Android/                     # Android 端项目
+Macos/                       # macOS 端（待开发）
+Ios/                         # iOS 端（待开发）
 ```
 
 ## 常用命令
 
+### Windows 端
+
 ```bash
-python Code/daily_tasks.py
+python Windows/Code/daily_tasks.py
 ```
 
 ```bash
@@ -36,10 +52,27 @@ pip install PySide6 cryptography pymysql pyinstaller
 ```
 
 ```bash
-python -m PyInstaller 每日任务管理.spec --clean
+cd Windows && python -m PyInstaller 每日任务管理.spec --clean
 ```
 
 只运行本地 JSON 模式时，`pymysql` 和 `cryptography` 是可选依赖；涉及 MySQL 模式、密码加密或打包验证时需要补齐。
+
+### Android 端
+
+```bash
+# 转换图标（需要 Pillow）
+python Android/convert_icon.py
+```
+
+```bash
+# 构建 APK（需要 Android SDK）
+cd Android && ./gradlew assembleDebug
+```
+
+```bash
+# 安装到设备
+adb install Android/app/build/outputs/apk/debug/app-debug.apk
+```
 
 ## 主要模块
 
@@ -56,8 +89,8 @@ python -m PyInstaller 每日任务管理.spec --clean
 - 任务数据：`Data/tasks.json`
 - 存储配置：`Data/settings.json`
 - 图标文件：`Ico/岚兮儿天下无敌好看.ico`
-- 打包配置：`每日任务管理.spec`
-- GitHub 跟踪文件不包含 `Data/`、`build/`、`dist/`、`*.spec` 和 `CLAUDE.md`，这些是本地数据或本地配置。
+- 打包配置：`Windows/每日任务管理.spec`
+- GitHub 跟踪文件不包含 `Data/`、`Windows/build/`、`Windows/dist/`、`*.spec` 和 `CLAUDE.md`，这些是本地数据或本地配置。
 - 打包资源必须包含图标：
 
 ```python
@@ -93,7 +126,7 @@ datas=[('Ico/岚兮儿天下无敌好看.ico', 'Ico')]
 统一命名参见：
 
 ```text
-docs/ui_terms.md
+Shared/docs/ui_terms.md
 ```
 
 修改界面时优先沿用该文档中的名称。

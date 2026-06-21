@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QMessageBox, QDialog,
     QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu, QComboBox
 )
-from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect, Signal
+from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect, Signal, QObject
 from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen, QAction
 
 
@@ -414,9 +414,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # 配置文件路径
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-MYSQL_CONNECT_TIMEOUT = 2
-MYSQL_READ_TIMEOUT = 3
-MYSQL_WRITE_TIMEOUT = 3
+MYSQL_CONNECT_TIMEOUT = 5
+MYSQL_READ_TIMEOUT = 8
+MYSQL_WRITE_TIMEOUT = 8
 
 # 默认配置
 DEFAULT_SETTINGS = {
@@ -564,8 +564,14 @@ PRIORITY_CONFIG = {
 }
 
 
-class TaskManager:
+class TaskManager(QObject):
+    # MySQL 异步初始化完成后发出信号
+    mysql_ready = Signal()
+    # MySQL 初始化失败信号
+    mysql_failed = Signal()
+
     def __init__(self):
+        super().__init__()
         self.settings = load_settings()
         self.storage_mode = self.settings.get("storage", "json")
         self.data_file = os.path.join(DATA_DIR, "tasks.json")
@@ -573,15 +579,46 @@ class TaskManager:
         self._mysql_initialized = False
         self._async_lock = threading.Lock()
 
-        # 延迟 MySQL 连接，先用 JSON 模式快速启动
+        # 防抖写入：连续操作只触发一次写入
+        self._save_timer = None  # QTimer，在 TaskApp 中初始化
+        self._save_delay = 500  # 毫秒
+
+        # MySQL 模式但 pymysql 不可用，回退到 JSON
         if self.storage_mode == "mysql" and not HAS_PYMYSQL:
             print("警告: pymysql 未安装，回退到 JSON 模式")
             self.storage_mode = "json"
 
-        self.tasks = self.load_data()
+        # 初始化数据：MySQL 模式用空数据，JSON 模式读文件
+        if self.storage_mode == "mysql":
+            self.tasks = {"pending": [], "completed": []}
+            self.loading_remote = True  # 标记正在从远程加载
+        else:
+            self.tasks = self._load_from_json()
+            self.loading_remote = False
 
-        # 检查是否需要数据迁移
-        self._check_migration()
+    def init_mysql_async(self):
+        """异步初始化 MySQL 连接"""
+        if self.storage_mode != "mysql":
+            return
+        def _do_init():
+            # 尝试连接 MySQL
+            if self._init_mysql():
+                # 连接成功，从 MySQL 加载数据
+                mysql_data = self._load_from_mysql()
+                if mysql_data:
+                    self.tasks = mysql_data
+                self.loading_remote = False
+                # 通知 UI 刷新
+                self.mysql_ready.emit()
+            else:
+                # 连接失败，回退到 JSON
+                print("MySQL 连接失败，回退到本地数据")
+                self.storage_mode = "json"
+                self.tasks = self._load_from_json()
+                self.loading_remote = False
+                # 通知 UI 刷新（回退模式）
+                self.mysql_failed.emit()
+        threading.Thread(target=_do_init, daemon=True).start()
 
     def _run_async(self, func, *args):
         """在后台线程执行数据库操作"""
@@ -590,6 +627,26 @@ class TaskManager:
         else:
             # JSON 模式直接同步执行
             func(*args)
+
+    def _schedule_save(self):
+        """防抖写入：连续操作只触发一次写入，由 TaskApp 中的 QTimer 驱动"""
+        if self._save_timer and self._save_timer.isActive():
+            self._save_timer.stop()
+        self._save_timer.start(self._save_delay)
+
+    def _do_save(self):
+        """实际执行写入（仅 JSON 模式需要全量写入，MySQL 模式靠增量更新）"""
+        if self.storage_mode == "mysql":
+            # MySQL 模式：增量更新已通过 _mysql_update_task/_mysql_delete_task 处理
+            # 这里只做连接保活检查
+            if self._mysql_initialized and self.db is not None:
+                try:
+                    self.db.ping(reconnect=True)
+                except:
+                    self._mysql_initialized = False
+                    self.db = None
+        else:
+            self._save_to_json()
 
     def _init_mysql(self):
         """初始化 MySQL 连接并建表"""
@@ -809,14 +866,8 @@ class TaskManager:
         return tasks
 
     def save_data(self):
-        if self.storage_mode == "mysql":
-            if self._ensure_mysql():
-                self._save_to_mysql()
-            else:
-                # MySQL 不可用，保存到 JSON 作为备份
-                self._save_to_json()
-        else:
-            self._save_to_json()
+        """兼容接口，统一走防抖写入"""
+        self._do_save()
 
     def _save_to_json(self):
         with open(self.data_file, "w", encoding="utf-8") as f:
@@ -898,8 +949,7 @@ class TaskManager:
         }
         self.tasks["pending"].append(task)
         self._run_async(self._mysql_update_task, task["id"], "pending", task)
-        if self.storage_mode != "mysql":
-            self._save_to_json()
+        self._schedule_save()
         return task
 
     def update_task(self, task_id, updates):
@@ -908,8 +958,7 @@ class TaskManager:
             if task["id"] == task_id:
                 task.update(updates)
                 self._run_async(self._mysql_update_task, task_id, "pending", task)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         for task in self.tasks["completed"]:
             if task["id"] == task_id:
@@ -918,8 +967,7 @@ class TaskManager:
                 if completed_at:
                     task["completed_at"] = completed_at
                 self._run_async(self._mysql_update_task, task_id, "completed", task)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         return False
 
@@ -930,8 +978,7 @@ class TaskManager:
                 self.tasks["completed"].insert(0, task)
                 self.tasks["pending"].pop(i)
                 self._run_async(self._mysql_update_task, task_id, "completed", task)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         return False
 
@@ -940,8 +987,7 @@ class TaskManager:
             if task["id"] == task_id:
                 self.tasks["pending"].pop(i)
                 self._run_async(self._mysql_delete_task, task_id)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         return False
 
@@ -953,8 +999,7 @@ class TaskManager:
                 self.tasks["pending"].append(task)
                 self.tasks["completed"].pop(i)
                 self._run_async(self._mysql_update_task, task_id, "pending", task)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         return False
 
@@ -964,8 +1009,7 @@ class TaskManager:
             if task["id"] == task_id:
                 task["pinned"] = not task.get("pinned", False)
                 self._run_async(self._mysql_update_task, task_id, "completed", task)
-                if self.storage_mode != "mysql":
-                    self._save_to_json()
+                self._schedule_save()
                 return True
         return False
 
@@ -1081,6 +1125,8 @@ class TaskDetailDialog(QDialog):
                 border: 1.5px solid #007AFF;
             }
         """)
+        self._setup_edit_context_menu(self.title_edit)
+        TaskApp.apply_input_shadow(self.title_edit)
         layout.addWidget(self.title_edit)
 
         # 内容（可编辑）
@@ -1102,6 +1148,8 @@ class TaskDetailDialog(QDialog):
                 border: 1.5px solid #007AFF;
             }
         """)
+        self._setup_edit_context_menu(self.content_edit)
+        TaskApp.apply_input_shadow(self.content_edit)
         layout.addWidget(self.content_edit)
 
         # 创建时间（只读）
@@ -1166,6 +1214,81 @@ class TaskDetailDialog(QDialog):
         l = QLabel(text)
         l.setStyleSheet("font-size: 12px; font-weight: 600; color: #8e8e93;")
         return l
+
+    def _setup_edit_context_menu(self, edit_widget):
+        """为 QLineEdit 或 QTextEdit 设置中文右键菜单"""
+        edit_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        edit_widget.customContextMenuRequested.connect(lambda pos, w=edit_widget: self._show_edit_context_menu(pos, w))
+
+    def _show_edit_context_menu(self, pos, edit_widget):
+        """显示中文编辑右键菜单（支持 QLineEdit 和 QTextEdit）"""
+        menu = QMenu(self)
+        menu.setStyleSheet(TaskApp.get_context_menu_style())
+
+        # 判断控件类型
+        is_line_edit = isinstance(edit_widget, QLineEdit)
+        is_text_edit = isinstance(edit_widget, QTextEdit)
+
+        # 获取选中状态
+        if is_line_edit:
+            has_selection = edit_widget.hasSelectedText()
+            has_text = len(edit_widget.text()) > 0
+        else:
+            has_selection = edit_widget.textCursor().hasSelection()
+            has_text = len(edit_widget.toPlainText()) > 0
+
+        has_clipboard = QApplication.clipboard().text() != ""
+
+        # 撤销
+        undo_action = QAction("撤销", self)
+        undo_action.setEnabled(edit_widget.isUndoAvailable())
+        undo_action.triggered.connect(edit_widget.undo)
+        menu.addAction(undo_action)
+
+        # 重做
+        redo_action = QAction("重做", self)
+        redo_action.setEnabled(edit_widget.isRedoAvailable())
+        redo_action.triggered.connect(edit_widget.redo)
+        menu.addAction(redo_action)
+
+        menu.addSeparator()
+
+        # 剪切
+        cut_action = QAction("剪切", self)
+        cut_action.setEnabled(has_selection)
+        cut_action.triggered.connect(edit_widget.cut)
+        menu.addAction(cut_action)
+
+        # 复制
+        copy_action = QAction("复制", self)
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(edit_widget.copy)
+        menu.addAction(copy_action)
+
+        # 粘贴
+        paste_action = QAction("粘贴", self)
+        paste_action.setEnabled(has_clipboard)
+        paste_action.triggered.connect(edit_widget.paste)
+        menu.addAction(paste_action)
+
+        # 删除
+        delete_action = QAction("删除", self)
+        delete_action.setEnabled(has_selection)
+        if is_line_edit:
+            delete_action.triggered.connect(edit_widget.del_)
+        else:
+            delete_action.triggered.connect(lambda: edit_widget.textCursor().removeSelectedText())
+        menu.addAction(delete_action)
+
+        menu.addSeparator()
+
+        # 全选
+        select_all_action = QAction("全选", self)
+        select_all_action.setEnabled(has_text)
+        select_all_action.triggered.connect(edit_widget.selectAll)
+        menu.addAction(select_all_action)
+
+        menu.exec(edit_widget.mapToGlobal(pos))
 
     def _btn(self, text, bg, hover):
         btn = QPushButton(text)
@@ -1278,6 +1401,8 @@ class TaskDetailDialog(QDialog):
                     border-radius: 8px; padding: 10px 12px; font-size: 14px;
                 }
             """)
+            # 阴影效果
+            TaskApp.apply_input_shadow(date_edit)
             layout.addWidget(date_edit)
 
             btn_layout = QHBoxLayout()
@@ -1440,6 +1565,8 @@ class SettingsDialog(QDialog):
         if self.settings.get("storage", "json") == "mysql":
             self.storage_combo.setCurrentIndex(1)
         self.storage_combo.currentIndexChanged.connect(self._on_storage_changed)
+        # 阴影效果
+        TaskApp.apply_input_shadow(self.storage_combo)
         storage_row.addWidget(self.storage_combo)
         layout.addLayout(storage_row)
 
@@ -1631,29 +1758,13 @@ class SettingsDialog(QDialog):
         # 中文右键菜单
         input_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         input_widget.customContextMenuRequested.connect(lambda pos, w=input_widget: self._show_context_menu(pos, w))
+        # 阴影效果
+        TaskApp.apply_input_shadow(input_widget)
 
     def _show_context_menu(self, pos, line_edit):
         """中文右键菜单"""
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 8px 24px;
-                font-size: 13px;
-            }
-            QMenu::item:selected {
-                background: #f0f0f0;
-                border-radius: 4px;
-            }
-            QMenu::item:disabled {
-                color: #c0c0c0;
-            }
-        """)
+        menu.setStyleSheet(TaskApp.get_context_menu_style())
 
         has_selection = line_edit.hasSelectedText()
         has_text = len(line_edit.text()) > 0
@@ -1990,6 +2101,17 @@ class TaskApp(QMainWindow):
         self.task_refresh_timer.setSingleShot(True)
         self.task_refresh_timer.timeout.connect(self.refresh_task_list_after_toggle)
 
+        # 防抖写入定时器
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.manager._do_save)
+        self.manager._save_timer = self._save_timer
+
+        # 异步初始化 MySQL（不阻塞 UI 显示）
+        self.manager.mysql_ready.connect(self._on_mysql_ready)
+        self.manager.mysql_failed.connect(self._on_mysql_failed)
+        QTimer.singleShot(100, self.manager.init_mysql_async)
+
         self.setWindowTitle("Dailyinfo")
         self.resize(1100, 720)
         self.setMinimumSize(900, 600)
@@ -2003,7 +2125,12 @@ class TaskApp(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self.setup_ui()
-        self.refresh_task_list()
+        # MySQL 模式先显示同步中，JSON 模式直接刷新
+        if self.manager.loading_remote:
+            self.empty_label.setText("正在同步任务数据...")
+            self.empty_label.setVisible(True)
+        else:
+            self.refresh_task_list()
         QTimer.singleShot(100, self.enable_blur)
 
     def enable_blur(self):
@@ -2201,6 +2328,8 @@ class TaskApp(QMainWindow):
         # 中文右键菜单
         self.task_input.setContextMenuPolicy(Qt.CustomContextMenu)
         self.task_input.customContextMenuRequested.connect(self._show_input_context_menu)
+        # 阴影效果
+        TaskApp.apply_input_shadow(self.task_input)
         toolbar_layout.addWidget(self.task_input, 1)
 
         # 搜索按钮
@@ -2694,7 +2823,19 @@ class TaskApp(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.exec()
         if dlg.result_saved:
-            QMessageBox.information(self, "提示", "配置已保存，重启应用后生效。")
+            # 检查存储方式是否变更，需要迁移
+            old_storage = self.manager.storage_mode
+            new_storage = self.manager.settings.get("storage", "json")
+            if old_storage != new_storage:
+                # 执行迁移
+                try:
+                    self.manager.storage_mode = new_storage
+                    self.manager._check_migration()
+                    QMessageBox.information(self, "提示", "配置已保存，数据迁移完成，重启应用后生效。")
+                except Exception as e:
+                    QMessageBox.warning(self, "提示", f"配置已保存，但数据迁移失败: {e}\n重启应用后生效。")
+            else:
+                QMessageBox.information(self, "提示", "配置已保存，重启应用后生效。")
 
     def show_history(self):
         """显示历史页面"""
@@ -2809,25 +2950,7 @@ class TaskApp(QMainWindow):
     def _show_input_context_menu(self, pos):
         """输入框中文右键菜单"""
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 8px 24px;
-                font-size: 13px;
-            }
-            QMenu::item:selected {
-                background: #f0f0f0;
-                border-radius: 4px;
-            }
-            QMenu::item:disabled {
-                color: #c0c0c0;
-            }
-        """)
+        menu.setStyleSheet(TaskApp.get_context_menu_style())
 
         line_edit = self.task_input
         has_selection = line_edit.hasSelectedText()
@@ -2881,6 +3004,42 @@ class TaskApp(QMainWindow):
         menu.addAction(select_all_action)
 
         menu.exec(line_edit.mapToGlobal(pos))
+
+    def _show_date_context_menu(self, pos, date_edit):
+        """日期输入框中文右键菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet(TaskApp.get_context_menu_style())
+
+        # QDateEdit 的右键菜单：复制当前日期文本
+        copy_action = QAction("复制", self)
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(date_edit.date().toString("yyyy-MM-dd")))
+        menu.addAction(copy_action)
+
+        # 粘贴
+        paste_action = QAction("粘贴", self)
+        clipboard_text = QApplication.clipboard().text()
+        paste_action.setEnabled(bool(clipboard_text))
+        paste_action.triggered.connect(lambda: self._paste_to_date_edit(date_edit, clipboard_text))
+        menu.addAction(paste_action)
+
+        menu.addSeparator()
+
+        # 全选（选中日期文本）
+        select_all_action = QAction("全选", self)
+        select_all_action.setEnabled(False)  # QDateEdit 不支持全选
+        menu.addAction(select_all_action)
+
+        menu.exec(date_edit.mapToGlobal(pos))
+
+    def _paste_to_date_edit(self, date_edit, text):
+        """将剪贴板文本粘贴到日期输入框"""
+        try:
+            from PySide6.QtCore import QDate
+            date = QDate.fromString(text, "yyyy-MM-dd")
+            if date.isValid():
+                date_edit.setDate(date)
+        except:
+            pass
 
     def header_mouse_press(self, event):
         if event.button() == Qt.LeftButton and not self.isMaximized():
@@ -3056,6 +3215,11 @@ class TaskApp(QMainWindow):
                 border-radius: 8px; padding: 8px 12px; font-size: 14px;
             }
         """)
+        # 中文右键菜单
+        date_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+        date_edit.customContextMenuRequested.connect(lambda pos, w=date_edit: self._show_date_context_menu(pos, w))
+        # 阴影效果
+        TaskApp.apply_input_shadow(date_edit)
         layout.addWidget(date_edit)
 
         btn_layout = QHBoxLayout()
@@ -3120,7 +3284,8 @@ class TaskApp(QMainWindow):
                     for i, t in enumerate(self.manager.tasks["completed"]):
                         if t["id"] == task_id:
                             self.manager.tasks["completed"].pop(i)
-                            self.manager.save_data()
+                            self.manager._run_async(self.manager._mysql_delete_task, task_id)
+                            self.manager._schedule_save()
                             break
                 else:
                     self.manager.delete_task(task_id)
@@ -3220,7 +3385,7 @@ class TaskApp(QMainWindow):
         else:
             self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(source) == 0)
-        self.task_list.setVisible(len(source) > 0)
+        # 不隐藏 task_list，保持表头可见
 
         for task in source:
             item = QTreeWidgetItem()
@@ -3342,7 +3507,7 @@ class TaskApp(QMainWindow):
 
         self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(all_tasks) == 0)
-        self.task_list.setVisible(len(all_tasks) > 0)
+        # 不隐藏 task_list，保持表头可见
 
         for task_type, task in all_tasks:
             item = QTreeWidgetItem()
@@ -3487,7 +3652,7 @@ class TaskApp(QMainWindow):
 
         self.empty_label.setText("✨ 暂无任务，添加一个吧~")
         self.empty_label.setVisible(len(source) == 0)
-        self.task_list.setVisible(len(source) > 0)
+        # 不隐藏 task_list，保持表头可见
 
         # 按置顶状态排序：pinned=True 的排在前面
         sorted_source = sorted(source, key=lambda t: not t.get("pinned", False))
@@ -3619,22 +3784,7 @@ class TaskApp(QMainWindow):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 8px 24px;
-                font-size: 13px;
-            }
-            QMenu::item:selected {
-                background: #f0f0f0;
-                border-radius: 4px;
-            }
-        """)
+        menu.setStyleSheet(TaskApp.get_context_menu_style())
 
         is_pinned = task.get("pinned", False)
         pin_action = QAction("取消置顶" if is_pinned else "置顶", self)
@@ -3648,11 +3798,85 @@ class TaskApp(QMainWindow):
         self.manager.toggle_pin_task(task_id)
         self.refresh_history_list()
 
+    def _on_mysql_ready(self):
+        """MySQL 异步初始化完成后刷新 UI"""
+        # 根据当前页面状态刷新对应列表
+        if self.showing_history:
+            self.refresh_history_list()
+        elif self.searching:
+            keyword = self.task_input.text().strip()
+            if keyword:
+                results = self.manager.search_tasks(keyword)
+                self.refresh_search_list(results)
+        else:
+            self.refresh_task_list()
+
+    def _on_mysql_failed(self):
+        """MySQL 连接失败，已回退到本地数据"""
+        # 刷新当前页面显示本地数据
+        if self.showing_history:
+            self.refresh_history_list()
+        elif self.searching:
+            keyword = self.task_input.text().strip()
+            if keyword:
+                results = self.manager.search_tasks(keyword)
+                self.refresh_search_list(results)
+        else:
+            self.refresh_task_list()
+        # 提示用户
+        self.empty_label.setText("MySQL 连接失败，已使用本地数据")
+        self.empty_label.setVisible(True)
+
     def update_stats(self):
         stats = self.manager.get_stats()
         self.stats_label.setText(
             f"待办 {stats['total_pending']}  ·  今日完成 {stats['today_completed']}  ·  历史 {stats['total_completed']}"
         )
+
+    @staticmethod
+    def get_context_menu_style():
+        """统一的右键菜单样式"""
+        return """
+            QMenu {
+                background: white;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 8px 24px;
+                font-size: 13px;
+                border: none;
+                outline: none;
+            }
+            QMenu::item:selected {
+                background: #f0f0f0;
+                border-radius: 4px;
+                border: none;
+                outline: none;
+            }
+            QMenu::item:disabled {
+                color: #c0c0c0;
+                border: none;
+                outline: none;
+            }
+        """
+
+    @staticmethod
+    def create_input_shadow():
+        """创建统一的输入框阴影效果"""
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(12)
+        shadow.setColor(QColor(0, 0, 0, 20))  # 浅色低透明度
+        shadow.setOffset(0, 2)
+        return shadow
+
+    @staticmethod
+    def apply_input_shadow(widget):
+        """为输入控件应用统一的阴影效果"""
+        shadow = TaskApp.create_input_shadow()
+        widget.setGraphicsEffect(shadow)
+        return shadow
 
 
 STYLE = """

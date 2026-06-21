@@ -4,10 +4,10 @@ Data/
 # Claude Code 指令文件
 CLAUDE.md
 
-# 打包文件
-build/
-dist/
-*.spec
+# Windows 打包文件
+Windows/build/
+Windows/dist/
+Windows/*.spec
 
 # Python 缓存
 __pycache__/
@@ -21,3 +21,18 @@ __pycache__/
 # 系统文件
 Thumbs.db
 Desktop.ini
+
+# Android 构建产物
+Android/.gradle/
+Android/build/
+Android/app/build/
+Android/local.properties
+Android/*.apk
+Android/*.aab
+
+# Android 生成文件
+Android/app/src/main/res/mipmap-*/ic_launcher.png
+Android/app/src/main/res/mipmap-*/ic_launcher_round.png
+
+# Gradle Wrapper
+Android/gradle/wrapper/gradle-wrapper.jar
