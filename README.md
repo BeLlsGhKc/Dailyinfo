@@ -1,4 +1,4 @@
-# Dailyinfo V3.1.1
+# Dailyinfo V3.1.2
 
 > 每日任务管理工具 | Windows + Android 双端支持
 
@@ -199,6 +199,13 @@ logging.basicConfig(level=logging.DEBUG)
 - 生成的 exe 文件为单文件，包含所有资源
 
 ## 更新日志
+
+### V3.1.2 (2026-06-21)
+
+**问题修复**
+- 修复打包后历史页面任务行右键置顶菜单仍出现黑边的问题。
+- 将历史页面置顶菜单改为自绘圆角玻璃弹出层，保留毛玻璃观感和圆角层级。
+- 修正 Windows 静默启动脚本路径，适配当前 `Windows/Code/daily_tasks.py` 目录结构。
 
 ### V3.1.1 (2026-06-21)
 

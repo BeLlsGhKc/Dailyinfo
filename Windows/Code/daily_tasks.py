@@ -3783,15 +3783,67 @@ class TaskApp(QMainWindow):
         if not task:
             return
 
-        menu = QMenu(self)
-        menu.setStyleSheet(TaskApp.get_context_menu_style())
-
         is_pinned = task.get("pinned", False)
-        pin_action = QAction("取消置顶" if is_pinned else "置顶", self)
-        pin_action.triggered.connect(lambda: self._toggle_pin(task_id))
-        menu.addAction(pin_action)
+        self._show_history_pin_popup(pos, task_id, is_pinned)
 
-        menu.exec(self.task_list.viewport().mapToGlobal(pos))
+    def _show_history_pin_popup(self, pos, task_id, is_pinned):
+        """历史页面置顶弹出层，避开 QMenu 在 exe 中的原生黑边。"""
+        popup = QDialog(self)
+        popup.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setFixedSize(108, 44)
+        popup.setStyleSheet("""
+            QDialog {
+                background: transparent;
+                border: none;
+            }
+        """)
+
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+
+        container = QFrame()
+        container.setObjectName("historyPinPopup")
+        container.setStyleSheet("""
+            #historyPinPopup {
+                background: rgba(255, 255, 255, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.78);
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: transparent;
+                color: #1d1d1f;
+                border: none;
+                border-radius: 7px;
+                padding: 8px 18px;
+                font-size: 13px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: rgba(0, 0, 0, 0.06);
+            }
+        """)
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(12)
+        shadow.setColor(QColor(0, 0, 0, 24))
+        shadow.setOffset(0, 2)
+        container.setGraphicsEffect(shadow)
+
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(3, 3, 3, 3)
+        container_layout.setSpacing(0)
+
+        pin_btn = QPushButton("取消置顶" if is_pinned else "置顶")
+        clean_button_focus(pin_btn)
+        pin_btn.setCursor(Qt.PointingHandCursor)
+        pin_btn.clicked.connect(lambda: (popup.accept(), self._toggle_pin(task_id)))
+        container_layout.addWidget(pin_btn)
+        layout.addWidget(container)
+
+        popup.move(self.task_list.viewport().mapToGlobal(pos))
+        popup.exec()
 
     def _toggle_pin(self, task_id):
         """切换置顶状态"""
@@ -3839,25 +3891,26 @@ class TaskApp(QMainWindow):
         return """
             QMenu {
                 background: white;
-                border: none;
+                border: 0px solid transparent;
                 border-radius: 8px;
                 padding: 4px 0;
+                margin: 0px;
             }
             QMenu::item {
                 padding: 8px 24px;
                 font-size: 13px;
-                border: none;
+                border: 0px solid transparent;
                 outline: none;
             }
             QMenu::item:selected {
                 background: #f0f0f0;
                 border-radius: 4px;
-                border: none;
+                border: 0px solid transparent;
                 outline: none;
             }
             QMenu::item:disabled {
                 color: #c0c0c0;
-                border: none;
+                border: 0px solid transparent;
                 outline: none;
             }
         """
