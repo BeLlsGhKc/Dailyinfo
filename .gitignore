@@ -1,8 +1,9 @@
 # 数据文件
 Data/
 
-# Claude Code 指令文件
+# AI 协作配置
 CLAUDE.md
+AGENTS.md
 
 # Windows 打包文件
 Windows/build/
