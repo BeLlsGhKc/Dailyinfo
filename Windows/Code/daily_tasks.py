@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QFrame, QGraphicsDropShadowEffect, QMessageBox, QDialog,
-    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu, QComboBox
+    QTextEdit, QDateEdit, QHeaderView, QCalendarWidget, QMenu, QComboBox,
+    QCheckBox
 )
 from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QRect, Signal, QObject
 from PySide6.QtGui import QColor, QIcon, QTextCharFormat, QPainter, QPen, QAction
@@ -418,10 +419,9 @@ MYSQL_CONNECT_TIMEOUT = 5
 MYSQL_READ_TIMEOUT = 8
 MYSQL_WRITE_TIMEOUT = 8
 
-# 默认配置
+# 默认配置（JSON 始终为主存储，MySQL 为可选后台同步）
 DEFAULT_SETTINGS = {
-    "storage": "json",
-    "last_storage": "json",
+    "mysql_enabled": False,
     "mysql": {
         "host": "",
         "port": 3306,
@@ -480,18 +480,33 @@ def load_settings():
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-                # 兼容旧配置，补充缺失字段
-                for key, value in DEFAULT_SETTINGS.items():
-                    if key not in settings:
-                        settings[key] = value
-                    elif isinstance(value, dict):
-                        for k, v in value.items():
-                            if k not in settings[key]:
-                                settings[key][k] = v
-                # 解密密码
-                if "mysql" in settings and "password" in settings["mysql"]:
-                    settings["mysql"]["password"] = decrypt_password(settings["mysql"]["password"])
-                return settings
+
+            # 旧配置自动升级：storage/mysql_enabled 迁移
+            if "storage" in settings:
+                old_storage = settings.pop("storage", "json")
+                settings.pop("last_storage", None)
+                if old_storage == "mysql":
+                    mysql_cfg = settings.get("mysql", {})
+                    if mysql_cfg.get("host") and mysql_cfg.get("user"):
+                        settings["mysql_enabled"] = True
+                else:
+                    settings["mysql_enabled"] = settings.get("mysql_enabled", False)
+                # 立即保存升级后的配置
+                save_settings(settings)
+
+            # 兼容旧配置，补充缺失字段
+            for key, value in DEFAULT_SETTINGS.items():
+                if key not in settings:
+                    settings[key] = value
+                elif isinstance(value, dict):
+                    for k, v in value.items():
+                        if k not in settings[key]:
+                            settings[key][k] = v
+
+            # 解密密码
+            if "mysql" in settings and "password" in settings["mysql"]:
+                settings["mysql"]["password"] = decrypt_password(settings["mysql"]["password"])
+            return settings
         except Exception:
             pass
     return DEFAULT_SETTINGS.copy()
@@ -573,60 +588,135 @@ class TaskManager(QObject):
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
-        self.storage_mode = self.settings.get("storage", "json")
         self.data_file = os.path.join(DATA_DIR, "tasks.json")
         self.db = None
         self._mysql_initialized = False
-        self._async_lock = threading.Lock()
+        self._mysql_lock = threading.Lock()  # 保护 db 连接
+        self._pending_sync_ids = set()       # 待同步到 MySQL 的 task id
+        self._full_sync_needed = False       # 是否需要全量同步
 
         # 防抖写入：连续操作只触发一次写入
         self._save_timer = None  # QTimer，在 TaskApp 中初始化
         self._save_delay = 500  # 毫秒
+        self._mysql_sync_timer = None  # MySQL 同步 QTimer，在 TaskApp 中初始化
 
-        # MySQL 模式但 pymysql 不可用，回退到 JSON
-        if self.storage_mode == "mysql" and not HAS_PYMYSQL:
-            print("警告: pymysql 未安装，回退到 JSON 模式")
-            self.storage_mode = "json"
+        # MySQL 启用状态检查
+        self._mysql_enabled = self.settings.get("mysql_enabled", False)
+        if self._mysql_enabled:
+            mysql_cfg = self.settings.get("mysql", {})
+            if not mysql_cfg.get("host") or not mysql_cfg.get("user"):
+                self._mysql_enabled = False
+            if not HAS_PYMYSQL:
+                print("警告: pymysql 未安装，MySQL 同步已禁用")
+                self._mysql_enabled = False
 
-        # 初始化数据：MySQL 模式用空数据，JSON 模式读文件
-        if self.storage_mode == "mysql":
-            self.tasks = {"pending": [], "completed": []}
-            self.loading_remote = True  # 标记正在从远程加载
-        else:
-            self.tasks = self._load_from_json()
-            self.loading_remote = False
+        # 永远从 JSON 加载，UI 立即可用
+        self.tasks = self._load_from_json()
+        self.loading_remote = False
 
     def init_mysql_async(self):
-        """异步初始化 MySQL 连接"""
-        if self.storage_mode != "mysql":
+        """异步连接 MySQL 并拉取最新数据合并到本地"""
+        if not self._mysql_enabled:
             return
+
         def _do_init():
             # 尝试连接 MySQL
-            if self._init_mysql():
-                # 连接成功，从 MySQL 加载数据
+            with self._mysql_lock:
+                if not self._init_mysql():
+                    print("MySQL 连接失败，仅使用本地数据")
+                    self.mysql_failed.emit()
+                    return
+
+            # 连接成功，从 MySQL 加载数据
+            with self._mysql_lock:
                 mysql_data = self._load_from_mysql()
-                if mysql_data:
-                    self.tasks = mysql_data
-                self.loading_remote = False
-                # 通知 UI 刷新
-                self.mysql_ready.emit()
-            else:
-                # 连接失败，回退到 JSON
-                print("MySQL 连接失败，回退到本地数据")
-                self.storage_mode = "json"
-                self.tasks = self._load_from_json()
-                self.loading_remote = False
-                # 通知 UI 刷新（回退模式）
-                self.mysql_failed.emit()
+
+            if mysql_data and (mysql_data["pending"] or mysql_data["completed"]):
+                # 合并: 本地 JSON 为主，MySQL 数据合并进来
+                merged = self._merge_tasks(self.tasks, mysql_data)
+                self.tasks = merged
+                # 将合并结果写回 JSON
+                self._save_to_json()
+                # 将合并结果全量同步回 MySQL（确保两端一致）
+                with self._mysql_lock:
+                    self._full_sync_to_mysql()
+
+            # 通知 UI 刷新
+            self.mysql_ready.emit()
+
         threading.Thread(target=_do_init, daemon=True).start()
 
-    def _run_async(self, func, *args):
-        """在后台线程执行数据库操作"""
-        if self.storage_mode == "mysql":
-            threading.Thread(target=func, args=args, daemon=True).start()
-        else:
-            # JSON 模式直接同步执行
-            func(*args)
+    def _sync_mysql(self, task_id=None):
+        """将变更异步同步到 MySQL（如果已启用）"""
+        if not self._mysql_enabled or not self._mysql_initialized:
+            return
+        if task_id:
+            self._pending_sync_ids.add(task_id)
+        self._schedule_mysql_sync()
+
+    def _schedule_mysql_sync(self):
+        """防抖 MySQL 同步"""
+        if self._mysql_sync_timer and not self._mysql_sync_timer.isActive():
+            self._mysql_sync_timer.start(800)
+
+    def _do_mysql_sync(self):
+        """实际执行 MySQL 同步（在后台线程）"""
+        if not self._mysql_enabled or not self._mysql_initialized:
+            return
+        if not self._pending_sync_ids and not self._full_sync_needed:
+            return
+
+        def _sync():
+            with self._mysql_lock:
+                try:
+                    if self._full_sync_needed:
+                        self._full_sync_to_mysql()
+                        self._full_sync_needed = False
+                        self._pending_sync_ids.clear()
+                    elif self._pending_sync_ids:
+                        ids = set(self._pending_sync_ids)
+                        self._pending_sync_ids.clear()
+                        self._incremental_sync_to_mysql(ids)
+                except Exception as e:
+                    print(f"MySQL 同步失败: {e}")
+                    self._full_sync_needed = True
+
+        threading.Thread(target=_sync, daemon=True).start()
+
+    def _incremental_sync_to_mysql(self, task_ids):
+        """增量同步指定任务到 MySQL（必须在 _mysql_lock 保护下调用）"""
+        for task_id in task_ids:
+            task, status = self._find_task_by_id(task_id)
+            if task:
+                self._mysql_update_task(task_id, status, task)
+            else:
+                self._mysql_delete_task(task_id)
+
+    def _find_task_by_id(self, task_id):
+        """按 ID 查找任务，返回 (task, status)"""
+        for task in self.tasks["pending"]:
+            if task["id"] == task_id:
+                return task, "pending"
+        for task in self.tasks["completed"]:
+            if task["id"] == task_id:
+                return task, "completed"
+        return None, None
+
+    def sync_to_mysql_on_close(self):
+        """关闭时同步数据到 MySQL（同步阻塞，由 closeEvent 调用）"""
+        if not self._mysql_enabled:
+            return
+        if not self._mysql_initialized:
+            with self._mysql_lock:
+                if not self._init_mysql():
+                    print("关闭时 MySQL 连接失败，跳过同步")
+                    return
+        try:
+            with self._mysql_lock:
+                self._full_sync_to_mysql()
+            print("关闭时 MySQL 同步完成")
+        except Exception as e:
+            print(f"关闭时 MySQL 同步失败: {e}")
 
     def _schedule_save(self):
         """防抖写入：连续操作只触发一次写入，由 TaskApp 中的 QTimer 驱动"""
@@ -635,18 +725,11 @@ class TaskManager(QObject):
         self._save_timer.start(self._save_delay)
 
     def _do_save(self):
-        """实际执行写入（仅 JSON 模式需要全量写入，MySQL 模式靠增量更新）"""
-        if self.storage_mode == "mysql":
-            # MySQL 模式：增量更新已通过 _mysql_update_task/_mysql_delete_task 处理
-            # 这里只做连接保活检查
-            if self._mysql_initialized and self.db is not None:
-                try:
-                    self.db.ping(reconnect=True)
-                except:
-                    self._mysql_initialized = False
-                    self.db = None
-        else:
-            self._save_to_json()
+        """防抖写入: 永远写 JSON，MySQL 异步同步"""
+        self._save_to_json()
+        if self._mysql_enabled and self._mysql_initialized:
+            self._full_sync_needed = True
+            self._schedule_mysql_sync()
 
     def _init_mysql(self):
         """初始化 MySQL 连接并建表"""
@@ -680,11 +763,9 @@ class TaskManager(QObject):
             return False
 
     def _ensure_mysql(self):
-        """确保 MySQL 连接可用，失败则回退到 JSON"""
+        """确保 MySQL 连接可用"""
         if not self._mysql_initialized:
-            if not self._init_mysql():
-                self.storage_mode = "json"
-                return False
+            return self._init_mysql()
         return True
 
     def _create_table(self):
@@ -708,9 +789,7 @@ class TaskManager(QObject):
         self.db.commit()
 
     def load_data(self):
-        if self.storage_mode == "mysql":
-            if self._ensure_mysql():
-                return self._load_from_mysql()
+        """加载数据（始终从 JSON 读取）"""
         return self._load_from_json()
 
     def _load_from_json(self):
@@ -721,32 +800,6 @@ class TaskManager(QObject):
             except:
                 return {"pending": [], "completed": []}
         return {"pending": [], "completed": []}
-
-    def _check_migration(self):
-        """检查是否需要数据迁移"""
-        last_storage = self.settings.get("last_storage", "json")
-        current_storage = self.storage_mode
-
-        # 存储方式没变，不需要迁移
-        if last_storage == current_storage:
-            return
-
-        print(f"检测到存储方式变更: {last_storage} -> {current_storage}，开始迁移数据...")
-
-        try:
-            if last_storage == "json" and current_storage == "mysql":
-                # JSON -> MySQL
-                self._migrate_json_to_mysql()
-            elif last_storage == "mysql" and current_storage == "json":
-                # MySQL -> JSON
-                self._migrate_mysql_to_json()
-
-            # 迁移成功，更新 last_storage
-            self.settings["last_storage"] = current_storage
-            save_settings(self.settings)
-            print("数据迁移完成")
-        except Exception as e:
-            print(f"数据迁移失败: {e}")
 
     def _merge_tasks(self, data_a, data_b):
         """合并两个数据源的任务，按 ID 去重，保留更新的版本"""
@@ -783,61 +836,6 @@ class TaskManager(QObject):
 
         return merged
 
-    def _migrate_json_to_mysql(self):
-        """JSON 数据迁移到 MySQL（合并模式）"""
-        json_data = self._load_from_json()
-
-        # 连接 MySQL
-        try:
-            self._init_mysql()
-        except:
-            raise Exception("无法连接 MySQL")
-
-        # 读取 MySQL 现有数据
-        mysql_data = self._load_from_mysql()
-
-        # 合并数据
-        merged = self._merge_tasks(json_data, mysql_data)
-
-        # 写入 MySQL
-        with self.db.cursor() as cursor:
-            cursor.execute("DELETE FROM tasks")
-            for status in ["pending", "completed"]:
-                for task in merged[status]:
-                    cursor.execute(
-                        """INSERT INTO tasks
-                        (id, title, content, priority, type, created_at, deadline, completed_at, pinned, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (
-                            task["id"], task["title"], task.get("content", ""),
-                            task["priority"], task["type"], task["created_at"],
-                            task.get("deadline", ""), task.get("completed_at"),
-                            1 if task.get("pinned") else 0, status
-                        )
-                    )
-        self.db.commit()
-
-    def _migrate_mysql_to_json(self):
-        """MySQL 数据迁移到 JSON（合并模式）"""
-        # 连接 MySQL
-        if not self.db:
-            try:
-                self._init_mysql()
-            except:
-                raise Exception("无法连接 MySQL")
-
-        mysql_data = self._load_from_mysql()
-
-        # 读取 JSON 现有数据
-        json_data = self._load_from_json()
-
-        # 合并数据
-        merged = self._merge_tasks(mysql_data, json_data)
-
-        # 写入 JSON 文件
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
-
     def _load_from_mysql(self):
         """从 MySQL 加载数据"""
         tasks = {"pending": [], "completed": []}
@@ -873,8 +871,8 @@ class TaskManager(QObject):
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(self.tasks, f, ensure_ascii=False, indent=2)
 
-    def _save_to_mysql(self):
-        """全量同步到 MySQL（批量操作时使用）"""
+    def _full_sync_to_mysql(self):
+        """全量同步当前数据到 MySQL（必须在 _mysql_lock 保护下调用）"""
         try:
             with self.db.cursor() as cursor:
                 cursor.execute("DELETE FROM tasks")
@@ -948,7 +946,7 @@ class TaskManager(QObject):
             "pinned": False
         }
         self.tasks["pending"].append(task)
-        self._run_async(self._mysql_update_task, task["id"], "pending", task)
+        self._sync_mysql(task["id"])
         self._schedule_save()
         return task
 
@@ -957,7 +955,7 @@ class TaskManager(QObject):
         for task in self.tasks["pending"]:
             if task["id"] == task_id:
                 task.update(updates)
-                self._run_async(self._mysql_update_task, task_id, "pending", task)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         for task in self.tasks["completed"]:
@@ -966,7 +964,7 @@ class TaskManager(QObject):
                 task.update(updates)
                 if completed_at:
                     task["completed_at"] = completed_at
-                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         return False
@@ -977,7 +975,7 @@ class TaskManager(QObject):
                 task["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 self.tasks["completed"].insert(0, task)
                 self.tasks["pending"].pop(i)
-                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         return False
@@ -986,7 +984,7 @@ class TaskManager(QObject):
         for i, task in enumerate(self.tasks["pending"]):
             if task["id"] == task_id:
                 self.tasks["pending"].pop(i)
-                self._run_async(self._mysql_delete_task, task_id)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         return False
@@ -998,7 +996,7 @@ class TaskManager(QObject):
                 task["completed_at"] = None
                 self.tasks["pending"].append(task)
                 self.tasks["completed"].pop(i)
-                self._run_async(self._mysql_update_task, task_id, "pending", task)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         return False
@@ -1008,7 +1006,7 @@ class TaskManager(QObject):
         for task in self.tasks["completed"]:
             if task["id"] == task_id:
                 task["pinned"] = not task.get("pinned", False)
-                self._run_async(self._mysql_update_task, task_id, "completed", task)
+                self._sync_mysql(task_id)
                 self._schedule_save()
                 return True
         return False
@@ -1527,48 +1525,18 @@ class SettingsDialog(QDialog):
         line.setStyleSheet("color: #e0e0e0;")
         layout.addWidget(line)
 
-        # 存储方式选择
-        storage_row = QHBoxLayout()
-        storage_label = QLabel("数据存储方式")
-        storage_label.setStyleSheet("font-size: 14px; font-weight: 500; color: #1d1d1f;")
-        storage_row.addWidget(storage_label)
-        storage_row.addStretch()
+        # MySQL 启用开关
+        mysql_toggle_row = QHBoxLayout()
+        mysql_label = QLabel("启用云端同步 (MySQL)")
+        mysql_label.setStyleSheet("font-size: 14px; font-weight: 500; color: #1d1d1f;")
+        mysql_toggle_row.addWidget(mysql_label)
+        mysql_toggle_row.addStretch()
 
-        self.storage_combo = QComboBox()
-        self.storage_combo.setFixedWidth(180)
-        self.storage_combo.addItems(["本地文件", "MySQL"])
-        self.storage_combo.setStyleSheet("""
-            QComboBox {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 6px 12px;
-                font-size: 13px;
-                color: #1d1d1f;
-            }
-            QComboBox:hover {
-                border: 1px solid #c0c0c0;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                selection-background-color: rgba(0, 122, 255, 0.1);
-                selection-color: #1d1d1f;
-                padding: 4px;
-            }
-        """)
-        if self.settings.get("storage", "json") == "mysql":
-            self.storage_combo.setCurrentIndex(1)
-        self.storage_combo.currentIndexChanged.connect(self._on_storage_changed)
-        # 阴影效果
-        TaskApp.apply_input_shadow(self.storage_combo)
-        storage_row.addWidget(self.storage_combo)
-        layout.addLayout(storage_row)
+        self.mysql_enabled_cb = QCheckBox()
+        self.mysql_enabled_cb.setChecked(self.settings.get("mysql_enabled", False))
+        self.mysql_enabled_cb.stateChanged.connect(self._on_mysql_toggled)
+        mysql_toggle_row.addWidget(self.mysql_enabled_cb)
+        layout.addLayout(mysql_toggle_row)
 
         # 如果没安装 pymysql，显示提示
         if not HAS_PYMYSQL:
@@ -1684,14 +1652,14 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self.mysql_config)
 
-        # 根据当前选择显示/隐藏 MySQL 配置
-        self.mysql_config.setVisible(self.storage_combo.currentIndex() == 1)
+        # 根据 checkbox 显示/隐藏 MySQL 配置
+        self.mysql_config.setVisible(self.settings.get("mysql_enabled", False))
 
         layout.addStretch()
 
         # 提示
-        tip = QLabel("切换存储方式需重启应用生效")
-        tip.setStyleSheet("font-size: 11px; color: #c0c0c0; font-style: italic;")
+        tip = QLabel("启用后将在后台自动同步数据到 MySQL")
+        tip.setStyleSheet("font-size: 11px; color: #8e8e93; font-style: italic;")
         tip.setAlignment(Qt.AlignCenter)
         layout.addWidget(tip)
 
@@ -1811,9 +1779,12 @@ class SettingsDialog(QDialog):
 
         menu.exec(line_edit.mapToGlobal(pos))
 
-    def _on_storage_changed(self, index):
-        """切换存储方式"""
-        self.mysql_config.setVisible(index == 1)
+    def _on_mysql_toggled(self, state):
+        """切换 MySQL 启用状态"""
+        if state != Qt.Unchecked:
+            self.mysql_config.show()
+        else:
+            self.mysql_config.hide()
 
     def _test_connection(self):
         """测试 MySQL 连接，自动创建数据库"""
@@ -1853,7 +1824,7 @@ class SettingsDialog(QDialog):
 
     def _save(self):
         """保存配置"""
-        self.settings["storage"] = "mysql" if self.storage_combo.currentIndex() == 1 else "json"
+        self.settings["mysql_enabled"] = self.mysql_enabled_cb.isChecked()
         self.settings["mysql"] = {
             "host": self.host_input.text().strip(),
             "port": int(self.port_input.text().strip() or 3306),
@@ -2101,11 +2072,17 @@ class TaskApp(QMainWindow):
         self.task_refresh_timer.setSingleShot(True)
         self.task_refresh_timer.timeout.connect(self.refresh_task_list_after_toggle)
 
-        # 防抖写入定时器
+        # JSON 防抖写入定时器
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self.manager._do_save)
         self.manager._save_timer = self._save_timer
+
+        # MySQL 同步防抖定时器
+        self._mysql_sync_timer = QTimer(self)
+        self._mysql_sync_timer.setSingleShot(True)
+        self._mysql_sync_timer.timeout.connect(self.manager._do_mysql_sync)
+        self.manager._mysql_sync_timer = self._mysql_sync_timer
 
         # 异步初始化 MySQL（不阻塞 UI 显示）
         self.manager.mysql_ready.connect(self._on_mysql_ready)
@@ -2125,17 +2102,24 @@ class TaskApp(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self.setup_ui()
-        # MySQL 模式先显示同步中，JSON 模式直接刷新
-        if self.manager.loading_remote:
-            self.empty_label.setText("正在同步任务数据...")
-            self.empty_label.setVisible(True)
-        else:
-            self.refresh_task_list()
+        # JSON 始终为主存储，直接刷新列表
+        self.refresh_task_list()
         QTimer.singleShot(100, self.enable_blur)
 
     def enable_blur(self):
         hwnd = int(self.winId())
         enable_blur_behind(hwnd)
+
+    def closeEvent(self, event):
+        """关闭窗口时确保数据写入磁盘"""
+        # 停止所有定时器
+        self._save_timer.stop()
+        self._mysql_sync_timer.stop()
+        # 确保 JSON 已写入（本地数据不丢）
+        self.manager._save_to_json()
+        # MySQL 同步不阻塞关闭，后台线程自行完成
+        # 下次启动时会自动合并，所以关闭时不同步也不丢数据
+        event.accept()
 
     def setup_ui(self):
         self.central = QWidget()
@@ -2823,19 +2807,26 @@ class TaskApp(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.exec()
         if dlg.result_saved:
-            # 检查存储方式是否变更，需要迁移
-            old_storage = self.manager.storage_mode
-            new_storage = self.manager.settings.get("storage", "json")
-            if old_storage != new_storage:
-                # 执行迁移
-                try:
-                    self.manager.storage_mode = new_storage
-                    self.manager._check_migration()
-                    QMessageBox.information(self, "提示", "配置已保存，数据迁移完成，重启应用后生效。")
-                except Exception as e:
-                    QMessageBox.warning(self, "提示", f"配置已保存，但数据迁移失败: {e}\n重启应用后生效。")
-            else:
-                QMessageBox.information(self, "提示", "配置已保存，重启应用后生效。")
+            # 热更新 manager 的 MySQL 配置
+            self.manager.settings = load_settings()
+            new_enabled = self.manager.settings.get("mysql_enabled", False)
+
+            if new_enabled and not self.manager._mysql_enabled:
+                # 用户新启用了 MySQL
+                self.manager._mysql_enabled = True
+                QTimer.singleShot(100, self.manager.init_mysql_async)
+            elif not new_enabled and self.manager._mysql_enabled:
+                # 用户关闭了 MySQL
+                self.manager._mysql_enabled = False
+                self.manager._mysql_initialized = False
+                if self.manager.db:
+                    try:
+                        self.manager.db.close()
+                    except:
+                        pass
+                    self.manager.db = None
+
+            QMessageBox.information(self, "提示", "配置已保存。")
 
     def show_history(self):
         """显示历史页面"""
@@ -3284,7 +3275,7 @@ class TaskApp(QMainWindow):
                     for i, t in enumerate(self.manager.tasks["completed"]):
                         if t["id"] == task_id:
                             self.manager.tasks["completed"].pop(i)
-                            self.manager._run_async(self.manager._mysql_delete_task, task_id)
+                            self.manager._sync_mysql(task_id)
                             self.manager._schedule_save()
                             break
                 else:
@@ -3875,9 +3866,6 @@ class TaskApp(QMainWindow):
                 self.refresh_search_list(results)
         else:
             self.refresh_task_list()
-        # 提示用户
-        self.empty_label.setText("MySQL 连接失败，已使用本地数据")
-        self.empty_label.setVisible(True)
 
     def update_stats(self):
         stats = self.manager.get_stats()
